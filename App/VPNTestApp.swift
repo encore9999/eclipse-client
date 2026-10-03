@@ -101,14 +101,18 @@ struct AppBackground: View {
                         .fill(RadialGradient(colors: [Color(hex: 0x7C5CFC, opacity: 0.15), .clear],
                                              center: .center, startRadius: 0, endRadius: 210))
                         .frame(width: 420, height: 420)
+                        .blur(radius: 40)
+                        .scaleEffect(float ? 1.05 : 1)
                         .position(x: 110, y: 70)
                         .offset(y: float ? -30 : 0)
                     Circle()
                         .fill(RadialGradient(colors: [Color(hex: 0xA07CFF, opacity: 0.10), .clear],
                                              center: .center, startRadius: 0, endRadius: 180))
                         .frame(width: 360, height: 360)
+                        .blur(radius: 40)
+                        .scaleEffect(float ? 1 : 1.05)
                         .position(x: g.size.width - 60, y: g.size.height - 180)
-                        .offset(y: float ? 30 : 0)
+                        .offset(y: float ? 0 : -30)
                 }
             }
             SceneCanvas()
@@ -230,13 +234,22 @@ struct SceneCanvas: View {
             let order = faces.sorted { a, b in
                 a.map { pts[$0].1 }.reduce(0, +) < b.map { pts[$0].1 }.reduce(0, +)
             }
-            for f in order {
-                var path = Path()
-                path.move(to: pts[f[0]].0)
-                for idx in f.dropFirst() { path.addLine(to: pts[idx].0) }
-                path.closeSubpath()
-                ctx.fill(path, with: .color(Color(hex: 0xA07CFF, opacity: 0.10)))
-                ctx.stroke(path, with: .color(Color(hex: 0xC4ABFF, opacity: 0.40)), lineWidth: 1)
+            ctx.drawLayer { layer in
+                layer.addFilter(.shadow(color: Color(hex: 0x7C5CFC, opacity: 0.40),
+                                        radius: 9, x: 0, y: 0))
+                for f in order {
+                    var path = Path()
+                    path.move(to: pts[f[0]].0)
+                    for idx in f.dropFirst() { path.addLine(to: pts[idx].0) }
+                    path.closeSubpath()
+                    let r = path.boundingRect
+                    let grad = Gradient(colors: [Color(hex: 0xA07CFF, opacity: 0.20),
+                                                 Color(hex: 0x7C5CFC, opacity: 0.06)])
+                    layer.fill(path, with: .linearGradient(grad,
+                                                           startPoint: CGPoint(x: r.minX, y: r.minY),
+                                                           endPoint: CGPoint(x: r.maxX, y: r.maxY)))
+                    layer.stroke(path, with: .color(Color(hex: 0xC4ABFF, opacity: 0.45)), lineWidth: 1)
+                }
             }
         }
     }
