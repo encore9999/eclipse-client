@@ -8,19 +8,20 @@ import CoreImage
 // Server, LinkParser, Pinger, AppGroup, TunnelKeys, SharedLog и XrayConfigBuilder
 // лежат в папке Shared/ (компилируются и в приложение, и в расширение).
 
-// MARK: - VPNTestApp.swift
+// MARK: - EclipseApp.swift
 
 @main
-struct EncoreApp: App {
+struct EclipseApp: App {
     @StateObject private var store = Store()
     @StateObject private var vpn = VPNController()
 
     init() {
         let appearance = UITabBarAppearance()
         appearance.configureWithOpaqueBackground()
-        appearance.backgroundColor = UIColor(red: 10/255, green: 7/255, blue: 20/255, alpha: 1)
+        appearance.backgroundColor = UIColor(red: 13/255, green: 11/255, blue: 26/255, alpha: 1)
         UITabBar.appearance().standardAppearance = appearance
         UITabBar.appearance().scrollEdgeAppearance = appearance
+        UITextView.appearance().backgroundColor = .clear
     }
 
     var body: some Scene {
@@ -28,6 +29,7 @@ struct EncoreApp: App {
             RootView()
                 .environmentObject(store)
                 .environmentObject(vpn)
+                .environmentObject(AppSettings.shared)
                 .preferredColorScheme(.dark)
         }
     }
@@ -35,6 +37,7 @@ struct EncoreApp: App {
 
 struct RootView: View {
     @EnvironmentObject var vpn: VPNController
+    @EnvironmentObject var store: Store
     @State private var tab = 0
 
     var body: some View {
@@ -53,7 +56,10 @@ struct RootView: View {
             }
             .accentColor(Theme.accentLight)
         }
-        .onAppear { vpn.load() }
+        .onAppear {
+            vpn.load()
+            Task { await store.autoRefresh() }
+        }
     }
 }
 
@@ -70,81 +76,168 @@ extension Color {
 }
 
 enum Theme {
-    static let bg = Color(hex: 0x0A0714)
-    static let bg2 = Color(hex: 0x140E2B)
+    static let bg = Color(hex: 0x0D0B1A)
+    static let bg2 = Color(hex: 0x140F28)
     static let card = Color(hex: 0x15121F)
-    static let border = Color.white.opacity(0.08)
-    static let accent = Color(hex: 0x6D4DFF)
-    static let accentDark = Color(hex: 0x4B2FD6)
-    static let accentLight = Color(hex: 0xA68BFF)
-    static let muted = Color(hex: 0x9E97B8)
+    static let border = Color.white.opacity(0.09)
+    static let accent = Color(hex: 0x7C5CFC)
+    static let accentDark = Color(hex: 0x6040E0)
+    static let accentLight = Color(hex: 0xC4ABFF)
+    static let accent2 = Color(hex: 0xA07CFF)
+    static let muted = Color(hex: 0x9B90CC)
 }
 
-// Грань изометрического куба: 0 — верх, 1 — правая, 2 — левая
-struct CubeFace: Shape {
-    let face: Int
-    func path(in rect: CGRect) -> Path {
-        let c = CGPoint(x: rect.midX, y: rect.midY)
-        let r = min(rect.width, rect.height) / 2
-        func v(_ deg: Double) -> CGPoint {
-            CGPoint(x: c.x + r * CGFloat(cos(deg * Double.pi / 180)),
-                    y: c.y + r * CGFloat(sin(deg * Double.pi / 180)))
-        }
-        let top = v(-90), ur = v(-30), lr = v(30), bot = v(90), ll = v(150), ul = v(210)
-        var p = Path()
-        switch face {
-        case 0: p.addLines([top, ur, c, ul])
-        case 1: p.addLines([ur, lr, bot, c])
-        default: p.addLines([bot, ll, ul, c])
-        }
-        p.closeSubpath()
-        return p
-    }
-}
-
-struct GlassCube: View {
-    var size: CGFloat
-    var body: some View {
-        ZStack {
-            CubeFace(face: 0).fill(Theme.accent.opacity(0.18))
-            CubeFace(face: 1).fill(Theme.accent.opacity(0.08))
-            CubeFace(face: 2).fill(Theme.accent.opacity(0.26))
-            CubeFace(face: 0).stroke(Theme.accentLight.opacity(0.45), lineWidth: 1)
-            CubeFace(face: 1).stroke(Theme.accentLight.opacity(0.45), lineWidth: 1)
-            CubeFace(face: 2).stroke(Theme.accentLight.opacity(0.45), lineWidth: 1)
-        }
-        .frame(width: size, height: size)
-        .shadow(color: Theme.accent.opacity(0.5), radius: 14)
-    }
-}
+// MARK: - Фон (как на сайте): свечение, волнистые линии, вращающиеся 3D-кубы
 
 struct AppBackground: View {
     @State private var float = false
+
     var body: some View {
         ZStack {
-            LinearGradient(colors: [Theme.bg2, Theme.bg], startPoint: .top, endPoint: .bottom)
-            WaveLines().allowsHitTesting(false)
+            Theme.bg
             GeometryReader { g in
                 ZStack {
-                    GlassCube(size: 90)
-                        .rotationEffect(.degrees(12))
-                        .position(x: g.size.width * 0.88, y: g.size.height * 0.10)
-                        .offset(y: float ? 8 : -8)
-                    GlassCube(size: 60)
-                        .rotationEffect(.degrees(-18))
-                        .position(x: g.size.width * 0.07, y: g.size.height * 0.40)
-                        .offset(y: float ? -6 : 6)
-                    GlassCube(size: 110)
-                        .rotationEffect(.degrees(20))
-                        .position(x: g.size.width * 0.95, y: g.size.height * 0.80)
-                        .offset(y: float ? 10 : -10)
+                    Circle()
+                        .fill(RadialGradient(colors: [Color(hex: 0x7C5CFC, opacity: 0.15), .clear],
+                                             center: .center, startRadius: 0, endRadius: 210))
+                        .frame(width: 420, height: 420)
+                        .position(x: 110, y: 70)
+                        .offset(y: float ? -30 : 0)
+                    Circle()
+                        .fill(RadialGradient(colors: [Color(hex: 0xA07CFF, opacity: 0.10), .clear],
+                                             center: .center, startRadius: 0, endRadius: 180))
+                        .frame(width: 360, height: 360)
+                        .position(x: g.size.width - 60, y: g.size.height - 180)
+                        .offset(y: float ? 30 : 0)
                 }
-                .opacity(0.75)
             }
+            SceneCanvas()
         }
         .ignoresSafeArea()
         .onAppear {
-            withAnimation(.easeInOut(duration: 4).repeatForever(autoreverses: true)) { float = true }
+            withAnimation(.easeInOut(duration: 7).repeatForever(autoreverses: true)) { float = true }
+        }
+    }
+}
+
+private struct WaveLine {
+    let yFrac: Double, yJitter: Double, phase: Double, speed: Double
+    let amp: Double, freq: Double, opacity: Double
+}
+
+private struct CubeSpec {
+    let x: Double, y: Double, s: Double, spin: Double, floatDur: Double
+}
+
+private struct SeededRNG {
+    var state: UInt64
+    mutating func next() -> Double {
+        state = state &* 6364136223846793005 &+ 1442695040888963407
+        return Double((state >> 33) & 0xFFFFFF) / Double(0x1000000)
+    }
+}
+
+struct SceneCanvas: View {
+    // параметры взяты из страницы входа: 16 линий и 5 кубов
+    private static let lines: [WaveLine] = {
+        var r = SeededRNG(state: 20260404)
+        return (0..<16).map { i in
+            WaveLine(yFrac: Double(i) / 16, yJitter: r.next() * 15,
+                     phase: r.next() * 2 * Double.pi,
+                     speed: (0.0025 + r.next() * 0.004) * 60,     // рад/с (60 к/с в оригинале)
+                     amp: 16 + r.next() * 35,
+                     freq: 0.0035 + r.next() * 0.003,
+                     opacity: 0.04 + r.next() * 0.08)
+        }
+    }()
+
+    private static let cubes: [CubeSpec] = [
+        CubeSpec(x: 0.06, y: 0.12, s: 90,  spin: 34, floatDur: 9),
+        CubeSpec(x: 0.84, y: 0.10, s: 130, spin: 42, floatDur: 11),
+        CubeSpec(x: 0.10, y: 0.62, s: 130, spin: 48, floatDur: 12),
+        CubeSpec(x: 0.88, y: 0.74, s: 90,  spin: 36, floatDur: 10),
+        CubeSpec(x: 0.46, y: 0.90, s: 60,  spin: 26, floatDur: 7)
+    ]
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { tl in
+            Canvas { ctx, size in
+                let t = tl.date.timeIntervalSinceReferenceDate
+                Self.drawLines(&ctx, size, t)
+                Self.drawCubes(&ctx, size, t)
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    private static func drawLines(_ ctx: inout GraphicsContext, _ size: CGSize, _ t: Double) {
+        let w = Double(size.width), h = Double(size.height)
+        for l in lines {
+            var path = Path()
+            let baseY = h * l.yFrac + l.yJitter
+            let ph = l.phase + l.speed * t
+            var x = 0.0
+            path.move(to: CGPoint(x: 0, y: baseY + sin(ph) * l.amp))
+            while x <= w {
+                path.addLine(to: CGPoint(x: x, y: baseY + sin(x * l.freq + ph) * l.amp))
+                x += 4
+            }
+            ctx.stroke(path,
+                       with: .color(Color(red: 140 / 255, green: 100 / 255, blue: 1, opacity: l.opacity)),
+                       lineWidth: 1)
+        }
+    }
+
+    // Куб: настоящее вращение в 3D + перспектива 900 (как perspective:900px в CSS)
+    private static func rotate(_ v: (Double, Double, Double),
+                               _ ax: Double, _ ay: Double, _ az: Double) -> (Double, Double, Double) {
+        var (x, y, z) = v
+        let cz = cos(az), sz = sin(az)
+        (x, y) = (x * cz - y * sz, x * sz + y * cz)
+        let cy = cos(ay), sy = sin(ay)
+        (x, z) = (x * cy + z * sy, -x * sy + z * cy)
+        let cx = cos(ax), sx = sin(ax)
+        (y, z) = (y * cx - z * sx, y * sx + z * cx)
+        return (x, y, z)
+    }
+
+    private static func drawCubes(_ ctx: inout GraphicsContext, _ size: CGSize, _ t: Double) {
+        let persp = 900.0
+        let ox = Double(size.width) / 2, oy = Double(size.height) / 2
+        let signs: [(Double, Double, Double)] = [(-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1),
+                                                  (-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1)]
+        let faces: [[Int]] = [[0, 1, 2, 3], [4, 5, 6, 7], [0, 1, 5, 4], [3, 2, 6, 7], [0, 3, 7, 4], [1, 2, 6, 5]]
+        let count = size.width < 700 ? 3 : cubes.count      // как на сайте: на телефоне только 3 куба
+
+        for (i, c) in cubes.prefix(count).enumerated() {
+            let fp = (t + Double(i) * 1.3) / c.floatDur
+            let ph = fp - floor(fp)
+            let tri = ph < 0.5 ? ph * 2 : (1 - ph) * 2
+            let eased = tri * tri * (3 - 2 * tri)
+            let q = ((t + Double(i) * 5) / c.spin).truncatingRemainder(dividingBy: 1)
+            let ax = 2 * Double.pi * q, ay = 2 * Double.pi * q, az = Double.pi * q
+            let h = c.s / 2
+            let cx = c.x * Double(size.width) + h
+            let cy = c.y * Double(size.height) + h - 34 * eased
+
+            var pts: [(CGPoint, Double)] = []
+            for sg in signs {
+                let r = rotate((sg.0 * h, sg.1 * h, sg.2 * h), ax, ay, az)
+                let k = persp / (persp - r.2)
+                pts.append((CGPoint(x: ox + (cx + r.0 - ox) * k, y: oy + (cy + r.1 - oy) * k), r.2))
+            }
+            // дальние грани рисуем первыми
+            let order = faces.sorted { a, b in
+                a.map { pts[$0].1 }.reduce(0, +) < b.map { pts[$0].1 }.reduce(0, +)
+            }
+            for f in order {
+                var path = Path()
+                path.move(to: pts[f[0]].0)
+                for idx in f.dropFirst() { path.addLine(to: pts[idx].0) }
+                path.closeSubpath()
+                ctx.fill(path, with: .color(Color(hex: 0xA07CFF, opacity: 0.10)))
+                ctx.stroke(path, with: .color(Color(hex: 0xC4ABFF, opacity: 0.40)), lineWidth: 1)
+            }
         }
     }
 }
@@ -155,6 +248,7 @@ struct Logo: View {
             .font(.system(size: 22, weight: .bold))
             .kerning(-0.5)
             .foregroundColor(.white)
+            .frame(maxWidth: .infinity)
     }
 }
 
@@ -174,9 +268,9 @@ extension View {
     func card(selected: Bool = false) -> some View {
         self
             .padding(16)
-            .background(RoundedRectangle(cornerRadius: 20).fill(Theme.card.opacity(0.92)))
+            .background(RoundedRectangle(cornerRadius: 22).fill(Color.white.opacity(0.055)))
             .overlay(
-                RoundedRectangle(cornerRadius: 20)
+                RoundedRectangle(cornerRadius: 22)
                     .stroke(selected ? Theme.accent : Theme.border, lineWidth: selected ? 1.5 : 1)
             )
     }
@@ -189,7 +283,9 @@ struct PrimaryButtonStyle: ButtonStyle {
             .foregroundColor(.white)
             .padding(.vertical, 14)
             .frame(maxWidth: .infinity)
-            .background(RoundedRectangle(cornerRadius: 12).fill(Theme.accent))
+            .background(RoundedRectangle(cornerRadius: 12)
+                .fill(LinearGradient(colors: [Theme.accent, Theme.accentDark],
+                                     startPoint: .topLeading, endPoint: .bottomTrailing)))
             .opacity(configuration.isPressed ? 0.8 : 1)
     }
 }
@@ -204,35 +300,6 @@ struct SecondaryButtonStyle: ButtonStyle {
             .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.04)))
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.border, lineWidth: 1))
             .opacity(configuration.isPressed ? 0.8 : 1)
-    }
-}
-
-// Тонкие волнистые линии на фоне (как на сайте), рисуются через Canvas
-struct WaveLines: View {
-    var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 15.0)) { timeline in
-            Canvas { ctx, size in
-                let t = timeline.date.timeIntervalSinceReferenceDate
-                let lines = 14
-                for i in 0..<lines {
-                    var path = Path()
-                    let baseY = size.height * (CGFloat(i) + 0.5) / CGFloat(lines)
-                    let amp = 14 + CGFloat(i % 4) * 5
-                    let phase = Double(i) * 0.55 + t * 0.25
-                    path.move(to: CGPoint(x: 0, y: baseY))
-                    var x: CGFloat = 0
-                    while x <= size.width + 6 {
-                        let w1 = sin(Double(x) / 90 + phase)
-                        let w2 = sin(Double(x) / 40 - phase * 1.3)
-                        let y = baseY + amp * CGFloat(w1) + amp * 0.5 * CGFloat(w2)
-                        path.addLine(to: CGPoint(x: x, y: y))
-                        x += 6
-                    }
-                    ctx.stroke(path, with: .color(Theme.accentLight.opacity(0.07)), lineWidth: 1)
-                }
-            }
-        }
-        .ignoresSafeArea()
     }
 }
 
@@ -263,6 +330,12 @@ struct SubGroup: Identifiable, Codable, Equatable {
     var url: String
     var servers: [Server] = []
     var updatedAt: Date?
+    // из заголовков подписки
+    var used: Int64?
+    var total: Int64?
+    var expire: Date?
+    var supportURL: String?
+    var webURL: String?
 }
 
 final class Store: ObservableObject {
@@ -393,8 +466,7 @@ final class Store: ObservableObject {
         defer { refreshing.remove(groupID) }
         do {
             var req = URLRequest(url: url)
-            req.setValue("Eclipse/1.0", forHTTPHeaderField: "User-Agent")
-            req.timeoutInterval = 20
+            AppSettings.shared.apply(to: &req)
             let (data, response) = try await URLSession.shared.data(for: req)
             let text = String(data: data, encoding: .utf8) ?? ""
             var seen = Set<String>()
@@ -414,6 +486,14 @@ final class Store: ObservableObject {
             let selectedLink = selected?.link
             groups[i].servers = parsed
             groups[i].updatedAt = Date()
+            if let http = response as? HTTPURLResponse {
+                let info = Store.parseUserInfo(http.value(forHTTPHeaderField: "subscription-userinfo"))
+                groups[i].used = info.used
+                groups[i].total = info.total
+                groups[i].expire = info.expire
+                groups[i].supportURL = http.value(forHTTPHeaderField: "support-url")
+                groups[i].webURL = http.value(forHTTPHeaderField: "profile-web-page-url")
+            }
             if let t = profileTitle(response) { groups[i].name = t }
             if !allServers.contains(where: { $0.id == selectedID }) {
                 selectedID = allServers.first(where: { $0.link == selectedLink })?.id ?? allServers.first?.id
@@ -428,6 +508,40 @@ final class Store: ObservableObject {
     @MainActor
     func refreshAll() async {
         let ids = groups.filter { !$0.url.isEmpty }.map { $0.id }
+        for id in ids { _ = await refresh(id) }
+    }
+
+    struct UserInfo { var used: Int64?; var total: Int64?; var expire: Date? }
+
+    // "upload=0; download=123; total=1073741824; expire=1735689600"
+    static func parseUserInfo(_ header: String?) -> UserInfo {
+        var u = UserInfo()
+        guard let header = header else { return u }
+        var up: Double = 0, down: Double = 0, hasUsage = false
+        for part in header.split(separator: ";") {
+            let kv = part.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+            guard kv.count == 2, let n = Double(kv[1]) else { continue }
+            switch kv[0].lowercased() {
+            case "upload": up = n; hasUsage = true
+            case "download": down = n; hasUsage = true
+            case "total": if n > 0 { u.total = Int64(n) }
+            case "expire": if n > 0 { u.expire = Date(timeIntervalSince1970: n) }
+            default: break
+            }
+        }
+        if hasUsage { u.used = Int64(up + down) }
+        return u
+    }
+
+    // Автообновление подписок при запуске (если включено в настройках)
+    @MainActor
+    func autoRefresh() async {
+        let s = AppSettings.shared
+        guard s.autoUpdate else { return }
+        let limit = TimeInterval(s.updateHours) * 3600
+        let ids = groups
+            .filter { !$0.url.isEmpty && Date().timeIntervalSince($0.updatedAt ?? .distantPast) > limit }
+            .map { $0.id }
         for id in ids { _ = await refresh(id) }
     }
 
@@ -546,7 +660,13 @@ final class VPNController: ObservableObject {
         if isActive {
             userStopped = true
             SharedLog.write("[app] пользователь отключил VPN")
-            manager?.connection.stopVPNTunnel()
+            if let m = manager, m.isOnDemandEnabled {
+                // иначе on-demand сразу поднимет туннель обратно
+                m.isOnDemandEnabled = false
+                m.saveToPreferences { _ in m.connection.stopVPNTunnel() }
+            } else {
+                manager?.connection.stopVPNTunnel()
+            }
             return
         }
         guard let server = server else {
@@ -566,7 +686,7 @@ final class VPNController: ObservableObject {
         // logPath = nil: путь в песочнице приложения расширению недоступен.
         let profile: XrayProfile
         do {
-            profile = try XrayConfigBuilder.build(for: server, logPath: nil)
+            profile = try XrayConfigBuilder.build(for: server, options: AppSettings.shared.tunnelOptions, logPath: nil)
         } catch {
             SharedLog.write("[app] ошибка конфига: \(error.localizedDescription)")
             self.error = error.localizedDescription
@@ -586,7 +706,8 @@ final class VPNController: ObservableObject {
                 TunnelKeys.socksUser: profile.socksUser,
                 TunnelKeys.socksPass: profile.socksPass,
                 TunnelKeys.serverHost: server.host,
-                TunnelKeys.serverPort: server.port
+                TunnelKeys.serverPort: server.port,
+                TunnelKeys.options: AppSettings.shared.tunnelOptions.json
             ]
             // Kill-switch средствами iOS: при падении туннеля трафик блокируется
             proto.includeAllNetworks = self.killSwitch
@@ -594,6 +715,10 @@ final class VPNController: ObservableObject {
             m.protocolConfiguration = proto
             m.localizedDescription = "Eclipse"
             m.isEnabled = true
+            // Автоподключение: iOS сама поднимает туннель при появлении сети
+            let onDemand = AppSettings.shared.onDemand
+            m.isOnDemandEnabled = onDemand
+            m.onDemandRules = onDemand ? [NEOnDemandRuleConnect() as NEOnDemandRule] : []
             m.saveToPreferences { saveError in
                 if let saveError = saveError {
                     SharedLog.write("[app] saveToPreferences: \(saveError.localizedDescription)")
@@ -640,16 +765,6 @@ struct HomeView: View {
         VStack(alignment: .leading, spacing: 20) {
             Logo()
 
-            VStack(alignment: .leading, spacing: 0) {
-                Text("Просто\nработает.")
-                    .font(.system(size: 46, weight: .bold))
-                    .kerning(-1.5)
-                    .foregroundColor(.white)
-                Text("Дёшево и надёжно.")
-                    .font(.system(size: 24, weight: .bold).italic())
-                    .foregroundColor(Theme.accentLight)
-            }
-
             Spacer()
 
             VStack(spacing: 14) {
@@ -689,15 +804,6 @@ struct HomeView: View {
                         .multilineTextAlignment(.center)
                 }
 
-                // Kill-switch (includeAllNetworks): применяется при следующем подключении
-                Toggle(isOn: $vpn.killSwitch) {
-                    Text("Блокировать трафик при обрыве")
-                        .font(.system(size: 13))
-                        .foregroundColor(Theme.muted)
-                }
-                .tint(Theme.accent)
-                .disabled(vpn.isActive)
-                .padding(.horizontal, 8)
             }
             .frame(maxWidth: .infinity)
 
@@ -739,12 +845,278 @@ struct HomeView: View {
     }
 }
 
+// MARK: - AppSettings.swift
+
+enum DNSPreset: String, CaseIterable, Identifiable {
+    case cloudflare, google, quad9, adguard, custom
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .cloudflare: return "Cloudflare"
+        case .google: return "Google"
+        case .quad9: return "Quad9"
+        case .adguard: return "AdGuard (без рекламы)"
+        case .custom: return "Свой"
+        }
+    }
+    var servers: [String] {
+        switch self {
+        case .cloudflare, .custom: return ["1.1.1.1", "1.0.0.1"]
+        case .google: return ["8.8.8.8", "8.8.4.4"]
+        case .quad9: return ["9.9.9.9", "149.112.112.112"]
+        case .adguard: return ["94.140.14.14", "94.140.15.15"]
+        }
+    }
+}
+
+enum UAPreset: String, CaseIterable, Identifiable {
+    case eclipse, happ, v2rayn, custom
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .eclipse: return "Eclipse"
+        case .happ: return "Happ"
+        case .v2rayn: return "v2rayN"
+        case .custom: return "Свой"
+        }
+    }
+    var value: String {
+        switch self {
+        case .eclipse, .custom: return "Eclipse/1.0"
+        case .happ: return "Happ/3.0.0"
+        case .v2rayn: return "v2rayN/7.0"
+        }
+    }
+}
+
+final class AppSettings: ObservableObject {
+    static let shared = AppSettings()
+    private static let keyPrefix = "eclipse.s."
+
+    // подключение
+    @Published var onDemand: Bool { didSet { save(onDemand, "onDemand") } }
+    @Published var mtu: Int { didSet { save(mtu, "mtu") } }
+    // DNS
+    @Published var dnsPreset: DNSPreset { didSet { save(dnsPreset.rawValue, "dnsPreset") } }
+    @Published var customDNS: String { didSet { save(customDNS, "customDNS") } }
+    // маршрутизация
+    @Published var bypassLAN: Bool { didSet { save(bypassLAN, "bypassLAN") } }
+    @Published var directRules: String { didSet { save(directRules, "directRules") } }
+    // ядро
+    @Published var sniffing: Bool { didSet { save(sniffing, "sniffing") } }
+    @Published var mux: Bool { didSet { save(mux, "mux") } }
+    @Published var fragment: Bool { didSet { save(fragment, "fragment") } }
+    // подписки
+    @Published var autoUpdate: Bool { didSet { save(autoUpdate, "autoUpdate") } }
+    @Published var updateHours: Int { didSet { save(updateHours, "updateHours") } }
+    @Published var requestTimeout: Int { didSet { save(requestTimeout, "requestTimeout") } }
+    @Published var uaPreset: UAPreset { didSet { save(uaPreset.rawValue, "uaPreset") } }
+    @Published var customUA: String { didSet { save(customUA, "customUA") } }
+    @Published var sendHWID: Bool { didSet { save(sendHWID, "sendHWID") } }
+    @Published var sortByPing: Bool { didSet { save(sortByPing, "sortByPing") } }
+
+    private func save(_ v: Any, _ key: String) {
+        UserDefaults.standard.set(v, forKey: Self.keyPrefix + key)
+    }
+
+    private init() {
+        let d = UserDefaults.standard
+        let p = AppSettings.keyPrefix
+        func b(_ k: String, _ def: Bool) -> Bool { d.object(forKey: p + k) as? Bool ?? def }
+        func i(_ k: String, _ def: Int) -> Int { d.object(forKey: p + k) as? Int ?? def }
+        func s(_ k: String, _ def: String) -> String { d.string(forKey: p + k) ?? def }
+        onDemand = b("onDemand", false)
+        mtu = i("mtu", 1400)
+        dnsPreset = DNSPreset(rawValue: s("dnsPreset", "cloudflare")) ?? .cloudflare
+        customDNS = s("customDNS", "")
+        bypassLAN = b("bypassLAN", true)
+        directRules = s("directRules", "")
+        sniffing = b("sniffing", true)
+        mux = b("mux", false)
+        fragment = b("fragment", false)
+        autoUpdate = b("autoUpdate", true)
+        updateHours = i("updateHours", 12)
+        requestTimeout = i("requestTimeout", 20)
+        uaPreset = UAPreset(rawValue: s("uaPreset", "eclipse")) ?? .eclipse
+        customUA = s("customUA", "")
+        sendHWID = b("sendHWID", false)
+        sortByPing = b("sortByPing", false)
+    }
+
+    func reset() {
+        onDemand = false; mtu = 1400
+        dnsPreset = .cloudflare; customDNS = ""
+        bypassLAN = true; directRules = ""
+        sniffing = true; mux = false; fragment = false
+        autoUpdate = true; updateHours = 12; requestTimeout = 20
+        uaPreset = .eclipse; customUA = ""; sendHWID = false; sortByPing = false
+    }
+
+    // MARK: производные значения
+
+    static func isIP(_ s: String) -> Bool {
+        var a = in_addr(), b = in6_addr()
+        return inet_pton(AF_INET, s, &a) == 1 || inet_pton(AF_INET6, s, &b) == 1
+    }
+
+    var resolvedDNS: [String] {
+        guard dnsPreset == .custom else { return dnsPreset.servers }
+        let items = customDNS
+            .components(separatedBy: CharacterSet(charactersIn: ", \n;"))
+            .filter { !$0.isEmpty && AppSettings.isIP($0) }
+        return items.isEmpty ? DNSPreset.cloudflare.servers : items
+    }
+
+    var tunnelOptions: TunnelOptions {
+        var o = TunnelOptions()
+        o.mtu = mtu
+        o.dns = resolvedDNS
+        o.mux = mux
+        o.fragment = fragment
+        o.sniffing = sniffing
+        o.bypassLAN = bypassLAN
+        o.directRules = directRules
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        return o
+    }
+
+    var userAgent: String {
+        if uaPreset == .custom {
+            let t = customUA.trimmingCharacters(in: .whitespaces)
+            return t.isEmpty ? UAPreset.eclipse.value : t
+        }
+        return uaPreset.value
+    }
+
+    static var modelIdentifier: String {
+        var info = utsname()
+        uname(&info)
+        return withUnsafePointer(to: &info.machine) {
+            $0.withMemoryRebound(to: CChar.self, capacity: 1) { String(cString: $0) }
+        }
+    }
+
+    // Заголовки запроса подписки (HWID — как у Happ: нужен провайдерам с привязкой к устройству)
+    func apply(to req: inout URLRequest) {
+        req.timeoutInterval = TimeInterval(requestTimeout)
+        req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        if sendHWID {
+            let dev = UIDevice.current
+            req.setValue(dev.identifierForVendor?.uuidString ?? "", forHTTPHeaderField: "x-hwid")
+            req.setValue("iOS", forHTTPHeaderField: "x-device-os")
+            req.setValue(dev.systemVersion, forHTTPHeaderField: "x-ver-os")
+            req.setValue(AppSettings.modelIdentifier, forHTTPHeaderField: "x-device-model")
+        }
+    }
+}
+
 // MARK: - SettingsView.swift
+
+struct SettingsSection<Content: View>: View {
+    let title: String
+    let footer: String?
+    let content: Content
+
+    init(_ title: String, footer: String? = nil, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.footer = footer
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title.uppercased())
+                .font(.system(size: 12, weight: .bold))
+                .kerning(0.8)
+                .foregroundColor(Theme.muted)
+                .padding(.leading, 4)
+            VStack(alignment: .leading, spacing: 14) { content }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .card()
+            if let f = footer {
+                Text(f)
+                    .font(.system(size: 12))
+                    .foregroundColor(Theme.muted)
+                    .padding(.horizontal, 4)
+            }
+        }
+    }
+}
+
+struct ToggleRow: View {
+    let title: String
+    var subtitle: String? = nil
+    @Binding var isOn: Bool
+    var disabled = false
+
+    var body: some View {
+        Toggle(isOn: $isOn) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(.white)
+                if let s = subtitle {
+                    Text(s)
+                        .font(.system(size: 12))
+                        .foregroundColor(Theme.muted)
+                }
+            }
+        }
+        .tint(Theme.accent)
+        .disabled(disabled)
+    }
+}
+
+struct MenuRow<T: Hashable>: View {
+    let title: String
+    @Binding var selection: T
+    let options: [(T, String)]
+
+    var body: some View {
+        HStack {
+            Text(title)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundColor(.white)
+            Spacer()
+            Menu {
+                ForEach(options.indices, id: \.self) { i in
+                    Button(options[i].1) { selection = options[i].0 }
+                }
+            } label: {
+                HStack(spacing: 5) {
+                    Text(options.first(where: { $0.0 == selection })?.1 ?? "—")
+                    Image(systemName: "chevron.up.chevron.down").font(.system(size: 10))
+                }
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(Theme.accentLight)
+            }
+        }
+    }
+}
+
+struct SettingsField: View {
+    let placeholder: String
+    @Binding var text: String
+
+    var body: some View {
+        TextField(placeholder, text: $text)
+            .textInputAutocapitalization(.never)
+            .disableAutocorrection(true)
+            .foregroundColor(.white)
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 12).fill(Color.black.opacity(0.25)))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.border, lineWidth: 1))
+    }
+}
 
 struct SettingsView: View {
     @EnvironmentObject var vpn: VPNController
+    @EnvironmentObject var settings: AppSettings
     @State private var log = ""
     @State private var copied = false
+    @State private var confirmReset = false
 
     private var statusName: String {
         switch vpn.status {
@@ -756,6 +1128,12 @@ struct SettingsView: View {
         case .disconnecting: return "disconnecting"
         @unknown default: return "unknown"
         }
+    }
+
+    private var version: String {
+        let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
+        let b = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
+        return "\(v) (\(b))"
     }
 
     private func row(_ k: String, _ v: String, bad: Bool = false) -> some View {
@@ -773,26 +1151,97 @@ struct SettingsView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 22) {
                 Logo()
                 Text("Настройки")
                     .font(.system(size: 34, weight: .bold))
                     .kerning(-1)
                     .foregroundColor(.white)
 
-                Toggle(isOn: $vpn.killSwitch) {
-                    Text("Блокировать трафик при обрыве")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(.white)
+                SettingsSection("Подключение",
+                                footer: "Изменения применяются при следующем подключении.") {
+                    ToggleRow(title: "Блокировать трафик при обрыве",
+                              subtitle: "Kill-switch: без VPN интернет не работает",
+                              isOn: $vpn.killSwitch, disabled: vpn.isActive)
+                    ToggleRow(title: "Автоподключение",
+                              subtitle: "iOS сама включит VPN, когда появится сеть",
+                              isOn: $settings.onDemand)
+                    MenuRow(title: "MTU", selection: $settings.mtu,
+                            options: [(1280, "1280"), (1400, "1400"), (1500, "1500")])
                 }
-                .tint(Theme.accent)
-                .disabled(vpn.isActive)
-                .card()
 
-                Text("Диагностика")
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundColor(.white)
-                VStack(spacing: 10) {
+                SettingsSection("DNS",
+                                footer: "Используется и системой, и ядром. Для своего DNS укажите IP-адреса через запятую.") {
+                    MenuRow(title: "Сервер", selection: $settings.dnsPreset,
+                            options: DNSPreset.allCases.map { ($0, $0.title) })
+                    if settings.dnsPreset == .custom {
+                        SettingsField(placeholder: "1.1.1.1, 8.8.8.8", text: $settings.customDNS)
+                    }
+                }
+
+                SettingsSection("Маршрутизация",
+                                footer: "По одному правилу в строке: домен (example.com), IP или подсеть (10.0.0.0/8). Эти адреса идут напрямую, мимо VPN. Для доменов нужен включённый sniffing.") {
+                    ToggleRow(title: "Локальные сети напрямую",
+                              subtitle: "10.x, 172.16.x, 192.168.x — без VPN",
+                              isOn: $settings.bypassLAN)
+                    ZStack(alignment: .topLeading) {
+                        if settings.directRules.isEmpty {
+                            Text("example.com\n192.168.1.0/24")
+                                .font(.system(size: 13, design: .monospaced))
+                                .foregroundColor(Theme.muted.opacity(0.6))
+                                .padding(.top, 8)
+                                .padding(.leading, 5)
+                        }
+                        TextEditor(text: $settings.directRules)
+                            .font(.system(size: 13, design: .monospaced))
+                            .foregroundColor(.white)
+                            .textInputAutocapitalization(.never)
+                            .disableAutocorrection(true)
+                            .frame(minHeight: 90)
+                    }
+                    .padding(6)
+                    .background(RoundedRectangle(cornerRadius: 12).fill(Color.black.opacity(0.25)))
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.border, lineWidth: 1))
+                }
+
+                SettingsSection("Ядро",
+                                footer: "Mux и фрагментация могут увеличить расход памяти расширения. Включайте по необходимости.") {
+                    ToggleRow(title: "Определять трафик (sniffing)",
+                              subtitle: "Нужен для правил по доменам",
+                              isOn: $settings.sniffing)
+                    ToggleRow(title: "Мультиплексирование (Mux)",
+                              subtitle: "Несколько потоков в одном соединении",
+                              isOn: $settings.mux)
+                    ToggleRow(title: "Фрагментация TLS",
+                              subtitle: "Помогает обходить DPI-блокировки",
+                              isOn: $settings.fragment)
+                }
+
+                SettingsSection("Подписки",
+                                footer: "HWID — идентификатор этого устройства. Некоторые провайдеры используют его, чтобы привязать подписку к устройству. Отправляйте, только если сервис этого требует.") {
+                    ToggleRow(title: "Автообновление",
+                              subtitle: "При запуске приложения",
+                              isOn: $settings.autoUpdate)
+                    if settings.autoUpdate {
+                        MenuRow(title: "Не чаще, чем раз в", selection: $settings.updateHours,
+                                options: [(6, "6 ч"), (12, "12 ч"), (24, "24 ч"), (48, "48 ч")])
+                    }
+                    MenuRow(title: "Таймаут запроса", selection: $settings.requestTimeout,
+                            options: [(10, "10 с"), (20, "20 с"), (30, "30 с"), (60, "60 с")])
+                    MenuRow(title: "User-Agent", selection: $settings.uaPreset,
+                            options: UAPreset.allCases.map { ($0, $0.title) })
+                    if settings.uaPreset == .custom {
+                        SettingsField(placeholder: "Например, MyClient/1.0", text: $settings.customUA)
+                    }
+                    ToggleRow(title: "Отправлять HWID",
+                              subtitle: "Заголовки x-hwid и данные об устройстве",
+                              isOn: $settings.sendHWID)
+                    ToggleRow(title: "Сортировать серверы по пингу",
+                              subtitle: "Сначала самые быстрые",
+                              isOn: $settings.sortByPing)
+                }
+
+                SettingsSection("Диагностика") {
                     row("iOS", UIDevice.current.systemVersion)
                     row("Статус VPN", statusName)
                     row("Приложение", Bundle.main.bundleIdentifier ?? "—")
@@ -803,41 +1252,53 @@ struct SettingsView: View {
                     row("Лог расширения", AppGroup.available ? "виден" : "не виден (нужна App Group)")
                     if let e = vpn.error { row("Последняя ошибка", e, bad: true) }
                 }
-                .card()
 
-                HStack {
-                    Text("Журнал")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundColor(.white)
-                    Spacer()
-                    Button { log = SharedLog.read() } label: {
-                        IconCircle(systemName: "arrow.clockwise")
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("ЖУРНАЛ")
+                            .font(.system(size: 12, weight: .bold))
+                            .kerning(0.8)
+                            .foregroundColor(Theme.muted)
+                            .padding(.leading, 4)
+                        Spacer()
+                        Button { log = SharedLog.read() } label: {
+                            IconCircle(systemName: "arrow.clockwise")
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
+                    HStack(spacing: 10) {
+                        Button(copied ? "Скопировано" : "Копировать") {
+                            UIPasteboard.general.string = log
+                            copied = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
+                        }
+                        .buttonStyle(SecondaryButtonStyle())
+                        Button("Очистить") {
+                            SharedLog.clear()
+                            log = ""
+                        }
+                        .buttonStyle(SecondaryButtonStyle())
+                    }
+                    Text(log.isEmpty ? "Журнал пуст" : log)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(log.isEmpty ? Theme.muted : .white)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                        .card()
                 }
-                HStack(spacing: 10) {
-                    Button(copied ? "Скопировано" : "Копировать") {
-                        UIPasteboard.general.string = log
-                        copied = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
-                    }
-                    .buttonStyle(SecondaryButtonStyle())
-                    Button("Очистить") {
-                        SharedLog.clear()
-                        log = ""
-                    }
-                    .buttonStyle(SecondaryButtonStyle())
+
+                SettingsSection("О приложении") {
+                    row("Eclipse", version)
+                    Button("Сбросить настройки") { confirmReset = true }
+                        .buttonStyle(SecondaryButtonStyle())
                 }
-                Text(log.isEmpty ? "Журнал пуст" : log)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(log.isEmpty ? Theme.muted : .white)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-                    .card()
             }
             .padding(.horizontal, 24)
             .padding(.top, 12)
             .padding(.bottom, 24)
+        }
+        .confirmationDialog("Сбросить все настройки?", isPresented: $confirmReset, titleVisibility: .visible) {
+            Button("Сбросить", role: .destructive) { settings.reset() }
         }
         .onAppear { log = SharedLog.read() }
         .onChange(of: vpn.status) { _ in
@@ -919,6 +1380,7 @@ struct ServersView: View {
 
 struct GroupSection: View {
     @EnvironmentObject var store: Store
+    @EnvironmentObject var settings: AppSettings
     let group: SubGroup
     let collapsed: Bool
     let toggle: () -> Void
@@ -931,6 +1393,37 @@ struct GroupSection: View {
         f.unitsStyle = .short
         f.locale = Locale(identifier: "ru_RU")
         return "\(count) · обновлено \(f.localizedString(for: d, relativeTo: Date()))"
+    }
+
+    private func fmt(_ b: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: b, countStyle: .binary)
+    }
+
+    private var trafficText: String? {
+        var parts: [String] = []
+        if let t = group.total { parts.append("\(fmt(group.used ?? 0)) из \(fmt(t))") }
+        else if let u = group.used { parts.append("израсходовано \(fmt(u))") }
+        if let e = group.expire {
+            let f = DateFormatter()
+            f.locale = Locale(identifier: "ru_RU")
+            f.dateStyle = .medium
+            parts.append(e < Date() ? "истекла \(f.string(from: e))" : "до \(f.string(from: e))")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    private var trafficFraction: Double? {
+        guard let t = group.total, t > 0 else { return nil }
+        return min(1, Double(group.used ?? 0) / Double(t))
+    }
+
+    private var serversSorted: [Server] {
+        guard settings.sortByPing else { return group.servers }
+        func key(_ p: Int?) -> Int {
+            guard let p = p else { return Int.max - 1 }   // без замера — после рабочих
+            return p < 0 ? Int.max : p                    // недоступные — в конец
+        }
+        return group.servers.sorted { key(store.pings[$0.id]) < key(store.pings[$1.id]) }
     }
 
     var body: some View {
@@ -985,8 +1478,21 @@ struct GroupSection: View {
             }
             .card()
 
+            if let info = trafficText {
+                VStack(alignment: .leading, spacing: 8) {
+                    if let f = trafficFraction {
+                        ProgressView(value: f).tint(f > 0.9 ? Color(hex: 0xFB923C) : Theme.accent)
+                    }
+                    Text(info)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(Theme.muted)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .card()
+            }
+
             if !collapsed {
-                ForEach(group.servers) { s in
+                ForEach(serversSorted) { s in
                     Button {
                         store.selectedID = s.id
                     } label: {
