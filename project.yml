@@ -13,7 +13,8 @@ targets:
       path: App/Info.plist
       properties:
         UILaunchScreen: {}
-        CFBundleDisplayName: VPNTest
+        CFBundleDisplayName: Eclipse
+        NSCameraUsageDescription: Камера нужна для сканирования QR-кода подписки
     entitlements:
       path: App/App.entitlements
       properties:
