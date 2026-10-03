@@ -19,29 +19,78 @@ enum XrayConfigError: LocalizedError {
 }
 
 enum XrayConfigBuilder {
-    static func build(for server: Server, logPath: String?, socksPort: Int = 10808) throws -> XrayProfile {
+    static func build(for server: Server, options: TunnelOptions = TunnelOptions(),
+                      logPath: String?, socksPort: Int = 10808) throws -> XrayProfile {
         let user = token(8), pass = token(16)
         var outbound = try makeOutbound(link: server.link)
         outbound["tag"] = "proxy"
 
+        // Mux: только для vless/vmess/trojan и не вместе с xtls-flow
+        let muxOK = ["vless", "vmess", "trojan"].contains(server.proto) && !server.link.contains("flow=")
+        if options.mux && muxOK { outbound["mux"] = ["enabled": true, "concurrency": 8] }
+
+        var extra: [[String: Any]] = [["tag": "direct", "protocol": "freedom"]]
+        if options.fragment {
+            // Фрагментация TLS ClientHello: соединение с сервером идёт через отдельный freedom-outbound
+            var ss = (outbound["streamSettings"] as? [String: Any]) ?? [:]
+            ss["sockopt"] = ["dialerProxy": "fragment"]
+            outbound["streamSettings"] = ss
+            extra.append(["tag": "fragment", "protocol": "freedom",
+                          "settings": ["fragment": ["packets": "tlshello",
+                                                    "length": "100-200", "interval": "10-20"]]])
+        }
+
         var log: [String: Any] = ["loglevel": "warning", "access": "none"]
         if let p = logPath { log["error"] = p }
 
-        let cfg: [String: Any] = [
+        let dnsServers = options.dns.isEmpty ? ["1.1.1.1", "1.0.0.1"] : options.dns
+        var sniffing: [String: Any] = ["enabled": options.sniffing]
+        if options.sniffing {
+            sniffing["destOverride"] = ["http", "tls", "quic"]
+            sniffing["routeOnly"] = true
+        }
+
+        var cfg: [String: Any] = [
             "log": log,
-            "dns": ["servers": ["1.1.1.1", "8.8.8.8"], "queryStrategy": "UseIP"],
+            "dns": ["servers": dnsServers, "queryStrategy": "UseIP"],
             "inbounds": [[
                 "tag": "socks-in", "listen": "127.0.0.1", "port": socksPort, "protocol": "socks",
                 "settings": ["auth": "password", "accounts": [["user": user, "pass": pass]],
                              "udp": true, "ip": "127.0.0.1"],
-                "sniffing": ["enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": true]
+                "sniffing": sniffing
             ]],
             // первый outbound — дефолтный
-            "outbounds": [outbound, ["tag": "direct", "protocol": "freedom"]]
+            "outbounds": [outbound] + extra
         ]
+        if let r = routing(options.directRules) { cfg["routing"] = r }
+
         let data = try JSONSerialization.data(withJSONObject: cfg, options: [.sortedKeys])
         return XrayProfile(json: String(decoding: data, as: UTF8.self),
                            socksPort: socksPort, socksUser: user, socksPass: pass)
+    }
+
+    // Прямые правила: домены (суффиксом) и IP/CIDR. geosite/geoip не поддерживаются (нет geo-файлов, экономим память).
+    private static func routing(_ raw: [String]) -> [String: Any]? {
+        var domains: [String] = [], ips: [String] = []
+        let known = ["domain:", "full:", "keyword:", "regexp:"]
+        for line in raw {
+            let r = line.trimmingCharacters(in: .whitespaces)
+            let low = r.lowercased()
+            if r.isEmpty || r.hasPrefix("#") || low.hasPrefix("geosite:") || low.hasPrefix("geoip:") { continue }
+            if known.contains(where: { low.hasPrefix($0) }) { domains.append(r) }
+            else if isIP(r) { ips.append(r) }
+            else { domains.append("domain:" + low) }
+        }
+        var rules: [[String: Any]] = []
+        if !domains.isEmpty { rules.append(["type": "field", "domain": domains, "outboundTag": "direct"]) }
+        if !ips.isEmpty { rules.append(["type": "field", "ip": ips, "outboundTag": "direct"]) }
+        return rules.isEmpty ? nil : ["domainStrategy": "AsIs", "rules": rules]
+    }
+
+    private static func isIP(_ s: String) -> Bool {
+        let base = s.split(separator: "/", maxSplits: 1).first.map(String.init) ?? s
+        var v4 = in_addr(), v6 = in6_addr()
+        return inet_pton(AF_INET, base, &v4) == 1 || inet_pton(AF_INET6, base, &v6) == 1
     }
 
     private static func token(_ n: Int) -> String {
