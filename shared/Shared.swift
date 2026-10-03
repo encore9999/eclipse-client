@@ -13,6 +13,9 @@ enum AppGroup {
         FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: id)
             ?? FileManager.default.temporaryDirectory
     }
+    static var available: Bool {
+        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: id) != nil
+    }
     static var xrayLogPath: String { container.appendingPathComponent("xray-error.log").path }
 }
 
