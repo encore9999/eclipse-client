@@ -20,6 +20,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     private struct Cfg {
         let json: String, port: Int, user: String, pass: String, host: String, serverPort: Int
+        let opts: TunnelOptions
         init?(_ p: [String: Any]?) {
             guard let p = p,
                   let j = p[TunnelKeys.xrayConfig] as? String,
@@ -29,6 +30,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                   let h = p[TunnelKeys.serverHost] as? String,
                   let sp = p[TunnelKeys.serverPort] as? Int else { return nil }
             json = j; self.port = port; user = u; pass = pw; host = h; serverPort = sp
+            opts = TunnelOptions.from(json: p[TunnelKeys.options] as? String)
         }
     }
 
@@ -120,7 +122,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private func startTun2Socks(_ c: Cfg) {
         let yaml = """
         tunnel:
-          mtu: 1400
+          mtu: \(c.opts.mtu)
           ipv4: 198.18.0.1
           ipv6: 'fd6e:a81b:704f:1211::1'
         socks5:
@@ -150,11 +152,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     private func makeSettings(_ c: Cfg) -> NEPacketTunnelNetworkSettings {
         let s = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "127.0.0.1")
-        s.mtu = 1400
+        s.mtu = NSNumber(value: c.opts.mtu)
 
         let v4 = NEIPv4Settings(addresses: ["198.18.0.1"], subnetMasks: ["255.255.255.0"])
         v4.includedRoutes = [NEIPv4Route.default()]
-        v4.excludedRoutes = [
+        v4.excludedRoutes = !c.opts.bypassLAN ? [] : [
             NEIPv4Route(destinationAddress: "10.0.0.0", subnetMask: "255.0.0.0"),
             NEIPv4Route(destinationAddress: "172.16.0.0", subnetMask: "255.240.0.0"),
             NEIPv4Route(destinationAddress: "192.168.0.0", subnetMask: "255.255.0.0"),
@@ -165,11 +167,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         // Забираем и IPv6, иначе v6-трафик утечёт мимо туннеля
         let v6 = NEIPv6Settings(addresses: ["fd6e:a81b:704f:1211::1"], networkPrefixLengths: [64])
         v6.includedRoutes = [NEIPv6Route.default()]
-        v6.excludedRoutes = [NEIPv6Route(destinationAddress: "fc00::", networkPrefixLength: 7),
+        v6.excludedRoutes = !c.opts.bypassLAN ? [] : [NEIPv6Route(destinationAddress: "fc00::", networkPrefixLength: 7),
                              NEIPv6Route(destinationAddress: "fe80::", networkPrefixLength: 10)]
         s.ipv6Settings = v6
 
-        let dns = NEDNSSettings(servers: ["1.1.1.1", "1.0.0.1"])
+        let dns = NEDNSSettings(servers: c.opts.dns.isEmpty ? ["1.1.1.1", "1.0.0.1"] : c.opts.dns)
         dns.matchDomains = [""]            // все домены резолвятся через туннельный DNS
         s.dnsSettings = dns
         return s
