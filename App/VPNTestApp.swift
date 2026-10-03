@@ -92,6 +92,7 @@ enum Theme {
 // MARK: - Фон (как на сайте): свечение, волнистые линии, вращающиеся 3D-кубы
 
 struct AppBackground: View {
+    @EnvironmentObject var vpn: VPNController
     @State private var float = false
 
     var body: some View {
@@ -117,7 +118,11 @@ struct AppBackground: View {
                         .offset(y: float ? 0 : -30)
                 }
             }
-            SceneCanvas()
+            SceneCanvas(connected: vpn.status == .connected)
+            // затемнение: общий слой + «тёмное пятно» в центре, где основной текст
+            Color.black.opacity(0.22)
+            RadialGradient(colors: [Color.black.opacity(0.40), .clear],
+                           center: .center, startRadius: 0, endRadius: 340)
         }
         .ignoresSafeArea()
         .onAppear {
@@ -143,7 +148,45 @@ private struct SeededRNG {
     }
 }
 
+// Скорость вращения кубов: медленно до подключения, разгон при подключении, затем плавное замедление.
+// Значения — множители к скорости с сайта (1.0 = как на странице входа). Меняйте под вкус.
+final class SceneMotion {
+    static let shared = SceneMotion()
+    static let idle = 0.25      // не подключено
+    static let peak = 5.0       // пик сразу после подключения
+    static let cruise = 0.7     // куда замедляется после разгона
+    static let rampTime = 1.4   // сколько секунд держим разгон
+    static let rampTau = 0.55   // как быстро разгоняемся
+    static let settleTau = 3.5  // как плавно замедляемся
+    static let idleTau = 1.5    // как плавно тормозим после отключения
+
+    private var phase = 0.0     // накопленное «время вращения»
+    private var speed = SceneMotion.idle
+    private var last: Double?
+    private var connectedAt: Double?
+    private var wasConnected = false
+
+    func update(now: Double, connected: Bool) -> Double {
+        if connected && !wasConnected { connectedAt = now }
+        if !connected { connectedAt = nil }
+        wasConnected = connected
+        let dt = min(max(now - (last ?? now), 0), 0.25)
+        last = now
+        let target: Double, tau: Double
+        if let ca = connectedAt {
+            if now - ca < SceneMotion.rampTime { target = SceneMotion.peak; tau = SceneMotion.rampTau }
+            else { target = SceneMotion.cruise; tau = SceneMotion.settleTau }
+        } else {
+            target = SceneMotion.idle; tau = SceneMotion.idleTau
+        }
+        speed += (target - speed) * (1 - exp(-dt / tau))
+        phase += speed * dt
+        return phase
+    }
+}
+
 struct SceneCanvas: View {
+    var connected: Bool = false
     // параметры взяты из страницы входа: 16 линий и 5 кубов
     private static let lines: [WaveLine] = {
         var r = SeededRNG(state: 20260404)
@@ -169,8 +212,9 @@ struct SceneCanvas: View {
         TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { tl in
             Canvas { ctx, size in
                 let t = tl.date.timeIntervalSinceReferenceDate
+                let spin = SceneMotion.shared.update(now: t, connected: connected)
                 Self.drawLines(&ctx, size, t)
-                Self.drawCubes(&ctx, size, t)
+                Self.drawCubes(&ctx, size, t, spin)
             }
         }
         .allowsHitTesting(false)
@@ -207,7 +251,7 @@ struct SceneCanvas: View {
         return (x, y, z)
     }
 
-    private static func drawCubes(_ ctx: inout GraphicsContext, _ size: CGSize, _ t: Double) {
+    private static func drawCubes(_ ctx: inout GraphicsContext, _ size: CGSize, _ t: Double, _ spin: Double) {
         let persp = 900.0
         let ox = Double(size.width) / 2, oy = Double(size.height) / 2
         let signs: [(Double, Double, Double)] = [(-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1),
@@ -220,7 +264,7 @@ struct SceneCanvas: View {
             let ph = fp - floor(fp)
             let tri = ph < 0.5 ? ph * 2 : (1 - ph) * 2
             let eased = tri * tri * (3 - 2 * tri)
-            let q = ((t + Double(i) * 5) / c.spin).truncatingRemainder(dividingBy: 1)
+            let q = ((spin + Double(i) * 5) / c.spin).truncatingRemainder(dividingBy: 1)
             let ax = 2 * Double.pi * q, ay = 2 * Double.pi * q, az = Double.pi * q
             let h = c.s / 2
             let cx = c.x * Double(size.width) + h
@@ -264,6 +308,7 @@ struct Logo: View {
             .kerning(-0.5)
             .foregroundColor(.white)
             .frame(maxWidth: .infinity)
+            .legible()
     }
 }
 
@@ -283,11 +328,18 @@ extension View {
     func card(selected: Bool = false) -> some View {
         self
             .padding(16)
-            .background(RoundedRectangle(cornerRadius: 22).fill(Color.white.opacity(0.055)))
+            .background(RoundedRectangle(cornerRadius: 22).fill(Color(hex: 0x0F0C20, opacity: 0.80)))
             .overlay(
                 RoundedRectangle(cornerRadius: 22)
                     .stroke(selected ? Theme.accent : Theme.border, lineWidth: selected ? 1.5 : 1)
             )
+    }
+}
+
+extension View {
+    // лёгкая тень под текстом, который лежит прямо на анимированном фоне
+    func legible() -> some View {
+        shadow(color: .black.opacity(0.65), radius: 6, x: 0, y: 1)
     }
 }
 
@@ -592,6 +644,7 @@ final class VPNController: ObservableObject {
     private var previous: NEVPNStatus = .disconnected
     private var sawActive = false      // в этой сессии было подключение/попытка
     private var userStopped = false    // отключил сам пользователь
+    private var pendingServer: Server?  // сервер, на который переключаемся
 
     init() {
         NotificationCenter.default.addObserver(
@@ -610,6 +663,11 @@ final class VPNController: ObservableObject {
             if new == .disconnected && self.sawActive {
                 self.sawActive = false
                 if !self.userStopped { self.collectError(conn) }
+            }
+            // смена сервера на лету: старый туннель остановился — поднимаем новый
+            if new == .disconnected, let next = self.pendingServer {
+                self.pendingServer = nil
+                self.start(next)
             }
         }
     }
@@ -671,17 +729,30 @@ final class VPNController: ObservableObject {
         }
     }
 
+    private func stopTunnel() {
+        userStopped = true
+        if let m = manager, m.isOnDemandEnabled {
+            // иначе on-demand сразу поднимет туннель обратно
+            m.isOnDemandEnabled = false
+            m.saveToPreferences { _ in m.connection.stopVPNTunnel() }
+        } else {
+            manager?.connection.stopVPNTunnel()
+        }
+    }
+
+    // Выбор другого сервера при активном подключении: перезапускаем туннель
+    func switchServer(_ server: Server) {
+        guard isActive else { return }
+        SharedLog.write("[app] смена сервера → \(server.host):\(server.port)")
+        pendingServer = server
+        stopTunnel()
+    }
+
     func toggle(server: Server?) {
         if isActive {
-            userStopped = true
             SharedLog.write("[app] пользователь отключил VPN")
-            if let m = manager, m.isOnDemandEnabled {
-                // иначе on-demand сразу поднимет туннель обратно
-                m.isOnDemandEnabled = false
-                m.saveToPreferences { _ in m.connection.stopVPNTunnel() }
-            } else {
-                manager?.connection.stopVPNTunnel()
-            }
+            pendingServer = nil
+            stopTunnel()
             return
         }
         guard let server = server else {
@@ -763,6 +834,7 @@ struct HomeView: View {
     @EnvironmentObject var store: Store
     @EnvironmentObject var vpn: VPNController
     var onPickServer: () -> Void
+    @State private var showPicker = false
 
     private var connected: Bool { vpn.status == .connected }
 
@@ -811,6 +883,7 @@ struct HomeView: View {
                 Text(statusText)
                     .font(.system(size: 20, weight: .semibold))
                     .foregroundColor(.white)
+                    .legible()
 
                 if let err = vpn.error {
                     Text(err)
@@ -824,7 +897,7 @@ struct HomeView: View {
 
             Spacer()
 
-            Button(action: onPickServer) {
+            Button(action: { showPicker = true }) {
                 HStack {
                     VStack(alignment: .leading, spacing: 6) {
                         Text(store.selected?.name ?? "Сервер не выбран")
@@ -847,7 +920,8 @@ struct HomeView: View {
                         }
                     }
                     Spacer()
-                    Image(systemName: "chevron.right")
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 13, weight: .semibold))
                         .foregroundColor(Theme.muted)
                 }
                 .card()
@@ -857,6 +931,91 @@ struct HomeView: View {
         .padding(.horizontal, 24)
         .padding(.top, 12)
         .padding(.bottom, 12)
+        .sheet(isPresented: $showPicker) {
+            ServerPickerSheet(onManage: {
+                showPicker = false
+                onPickServer()
+            })
+            .environmentObject(store)
+            .environmentObject(vpn)
+            .environmentObject(AppSettings.shared)
+        }
+    }
+}
+
+struct ServerPickerSheet: View {
+    @EnvironmentObject var store: Store
+    @EnvironmentObject var vpn: VPNController
+    @EnvironmentObject var settings: AppSettings
+    @Environment(\.dismiss) private var dismiss
+    var onManage: () -> Void
+
+    private func sorted(_ g: SubGroup) -> [Server] {
+        guard settings.sortByPing else { return g.servers }
+        func key(_ p: Int?) -> Int {
+            guard let p = p else { return Int.max - 1 }
+            return p < 0 ? Int.max : p
+        }
+        return g.servers.sorted { key(store.pings[$0.id]) < key(store.pings[$1.id]) }
+    }
+
+    private func pick(_ s: Server) {
+        let changed = store.selected?.id != s.id
+        store.selectedID = s.id
+        if changed && vpn.isActive { vpn.switchServer(s) }
+        dismiss()
+    }
+
+    var body: some View {
+        ZStack {
+            Theme.bg.ignoresSafeArea()
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    Text("Выбор сервера")
+                        .font(.system(size: 26, weight: .bold))
+                        .foregroundColor(.white)
+                    Spacer()
+                    Button {
+                        Task { for g in store.groups { await store.pingAll(g.id) } }
+                    } label: {
+                        IconCircle(systemName: "bolt.fill", busy: !store.pingingGroups.isEmpty)
+                    }
+                    .buttonStyle(.plain)
+                }
+                if vpn.isActive {
+                    Text("При смене сервера подключение перезапустится. Пока VPN включён, пинг показывает задержку через него.")
+                        .font(.system(size: 12))
+                        .foregroundColor(Theme.muted)
+                }
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 10) {
+                        if store.groups.isEmpty {
+                            Text("Серверов пока нет. Добавьте подписку на вкладке «Серверы».")
+                                .font(.system(size: 14))
+                                .foregroundColor(Theme.muted)
+                        }
+                        ForEach(store.groups) { g in
+                            Text(g.name.uppercased())
+                                .font(.system(size: 12, weight: .bold))
+                                .kerning(0.8)
+                                .foregroundColor(Theme.muted)
+                                .padding(.top, 6)
+                            ForEach(sorted(g)) { sv in
+                                Button { pick(sv) } label: {
+                                    ServerRow(server: sv, selected: store.selected?.id == sv.id,
+                                              ping: store.pings[sv.id])
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                }
+                Button("Управление подписками") { onManage() }
+                    .buttonStyle(SecondaryButtonStyle())
+            }
+            .padding(24)
+        }
+        .preferredColorScheme(.dark)
     }
 }
 
@@ -1047,6 +1206,7 @@ struct SettingsSection<Content: View>: View {
                 .kerning(0.8)
                 .foregroundColor(Theme.muted)
                 .padding(.leading, 4)
+                .legible()
             VStack(alignment: .leading, spacing: 14) { content }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .card()
@@ -1055,6 +1215,7 @@ struct SettingsSection<Content: View>: View {
                     .font(.system(size: 12))
                     .foregroundColor(Theme.muted)
                     .padding(.horizontal, 4)
+                    .legible()
             }
         }
     }
@@ -1172,6 +1333,7 @@ struct SettingsView: View {
                     .font(.system(size: 34, weight: .bold))
                     .kerning(-1)
                     .foregroundColor(.white)
+                    .legible()
 
                 SettingsSection("Подключение",
                                 footer: "Изменения применяются при следующем подключении.") {
@@ -1339,6 +1501,7 @@ struct ServersView: View {
                         .font(.system(size: 34, weight: .bold))
                         .kerning(-1)
                         .foregroundColor(.white)
+                        .legible()
                     Spacer()
                     Button {
                         Task { await store.refreshAll() }
@@ -1396,6 +1559,7 @@ struct ServersView: View {
 struct GroupSection: View {
     @EnvironmentObject var store: Store
     @EnvironmentObject var settings: AppSettings
+    @EnvironmentObject var vpn: VPNController
     let group: SubGroup
     let collapsed: Bool
     let toggle: () -> Void
@@ -1509,7 +1673,10 @@ struct GroupSection: View {
             if !collapsed {
                 ForEach(serversSorted) { s in
                     Button {
-                        store.selectedID = s.id
+                        if store.selected?.id != s.id {
+                            store.selectedID = s.id
+                            if vpn.isActive { vpn.switchServer(s) }
+                        }
                     } label: {
                         ServerRow(server: s, selected: store.selected?.id == s.id, ping: store.pings[s.id])
                     }
