@@ -47,6 +47,9 @@ struct RootView: View {
                 ServersView()
                     .tabItem { Label("Серверы", systemImage: "globe") }
                     .tag(1)
+                SettingsView()
+                    .tabItem { Label("Настройки", systemImage: "gearshape") }
+                    .tag(2)
             }
             .accentColor(Theme.accentLight)
         }
@@ -458,6 +461,8 @@ final class VPNController: ObservableObject {
     }
     private var manager: NETunnelProviderManager?
     private var previous: NEVPNStatus = .disconnected
+    private var sawActive = false      // в этой сессии было подключение/попытка
+    private var userStopped = false    // отключил сам пользователь
 
     init() {
         NotificationCenter.default.addObserver(
@@ -465,25 +470,58 @@ final class VPNController: ObservableObject {
         ) { [weak self] _ in
             guard let self = self, let conn = self.manager?.connection else { return }
             let new = conn.status
-            let wasActive = [NEVPNStatus.connecting, .connected, .reasserting].contains(self.previous)
+            SharedLog.write("[app] статус: \(new.rawValue)")
             self.previous = new
             self.status = new
+            switch new {
+            case .connecting, .connected, .reasserting: self.sawActive = true
+            default: break
+            }
             if new == .connected { self.error = nil }
-            if new == .disconnected && wasActive { self.collectError(conn) }
+            if new == .disconnected && self.sawActive {
+                self.sawActive = false
+                if !self.userStopped { self.collectError(conn) }
+            }
         }
     }
 
-    // Ошибка, с которой упало расширение: сначала App Group, затем системная
+    // Ошибка, с которой остановилось расширение: сначала App Group, затем системная
     private func collectError(_ conn: NEVPNConnection) {
         let d = AppGroup.defaults
         if let msg = d.string(forKey: TunnelKeys.lastError) {
             d.removeObject(forKey: TunnelKeys.lastError)
+            SharedLog.write("[app] ошибка из App Group: \(msg)")
             error = msg
-        } else if #available(iOS 16.0, *) {
-            conn.fetchLastDisconnectError { [weak self] err in
-                DispatchQueue.main.async { if let err = err { self?.error = err.localizedDescription } }
-            }
+            return
         }
+        let fallback = "Туннель остановился без сообщения об ошибке. Вероятно, расширение упало при запуске. Подробности на вкладке «Настройки»."
+        if #available(iOS 16.0, *) {
+            conn.fetchLastDisconnectError { [weak self] err in
+                DispatchQueue.main.async {
+                    if let err = err as NSError? {
+                        SharedLog.write("[app] fetchLastDisconnectError: \(err.domain) #\(err.code): \(err.localizedDescription)")
+                        self?.error = err.localizedDescription
+                    } else {
+                        SharedLog.write("[app] fetchLastDisconnectError: nil")
+                        self?.error = fallback
+                    }
+                }
+            }
+        } else {
+            SharedLog.write("[app] iOS < 16: причина отключения недоступна")
+            error = fallback
+        }
+    }
+
+    // Реально встроенное расширение (если сервис подписи переименовал бандлы)
+    var embeddedExtensionID: String? {
+        guard let url = Bundle.main.builtInPlugInsURL,
+              let items = try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil),
+              let appex = items.first(where: { $0.pathExtension == "appex" }) else { return nil }
+        return Bundle(url: appex)?.bundleIdentifier
+    }
+    var tunnelBundleID: String {
+        embeddedExtensionID ?? ((Bundle.main.bundleIdentifier ?? "") + ".tunnel")
     }
 
     func load() {
@@ -506,6 +544,8 @@ final class VPNController: ObservableObject {
 
     func toggle(server: Server?) {
         if isActive {
+            userStopped = true
+            SharedLog.write("[app] пользователь отключил VPN")
             manager?.connection.stopVPNTunnel()
             return
         }
@@ -518,20 +558,27 @@ final class VPNController: ObservableObject {
 
     private func start(_ server: Server) {
         error = nil
-        // Конфиг строим в приложении: ошибки ссылки видны до старта туннеля
+        userStopped = false
+        sawActive = false
+        SharedLog.clear()
+        SharedLog.write("[app] старт: \(server.protocolLabel) \(server.host):\(server.port)")
+        // Конфиг строим в приложении: ошибки ссылки видны до старта туннеля.
+        // logPath = nil: путь в песочнице приложения расширению недоступен.
         let profile: XrayProfile
         do {
-            profile = try XrayConfigBuilder.build(for: server, logPath: AppGroup.xrayLogPath)
+            profile = try XrayConfigBuilder.build(for: server, logPath: nil)
         } catch {
+            SharedLog.write("[app] ошибка конфига: \(error.localizedDescription)")
             self.error = error.localizedDescription
             return
         }
+        SharedLog.write("[app] конфиг Xray собран (\(profile.json.count) байт)")
 
         NETunnelProviderManager.loadAllFromPreferences { [weak self] managers, _ in
             guard let self = self else { return }
             let m = managers?.first ?? NETunnelProviderManager()
             let proto = NETunnelProviderProtocol()
-            proto.providerBundleIdentifier = (Bundle.main.bundleIdentifier ?? "") + ".tunnel"
+            proto.providerBundleIdentifier = self.tunnelBundleID
             proto.serverAddress = server.host
             proto.providerConfiguration = [
                 TunnelKeys.xrayConfig: profile.json,
@@ -549,6 +596,7 @@ final class VPNController: ObservableObject {
             m.isEnabled = true
             m.saveToPreferences { saveError in
                 if let saveError = saveError {
+                    SharedLog.write("[app] saveToPreferences: \(saveError.localizedDescription)")
                     DispatchQueue.main.async {
                         self.error = "Не удалось сохранить VPN: \(saveError.localizedDescription)"
                     }
@@ -557,8 +605,10 @@ final class VPNController: ObservableObject {
                 m.loadFromPreferences { _ in
                     DispatchQueue.main.async { self.manager = m }
                     do {
+                        SharedLog.write("[app] startVPNTunnel, провайдер \(self.tunnelBundleID)")
                         try m.connection.startVPNTunnel()
                     } catch {
+                        SharedLog.write("[app] startVPNTunnel error: \(error.localizedDescription)")
                         DispatchQueue.main.async { self.error = error.localizedDescription }
                     }
                 }
@@ -686,6 +736,113 @@ struct HomeView: View {
         .padding(.horizontal, 24)
         .padding(.top, 12)
         .padding(.bottom, 12)
+    }
+}
+
+// MARK: - SettingsView.swift
+
+struct SettingsView: View {
+    @EnvironmentObject var vpn: VPNController
+    @State private var log = ""
+    @State private var copied = false
+
+    private var statusName: String {
+        switch vpn.status {
+        case .invalid: return "invalid"
+        case .disconnected: return "disconnected"
+        case .connecting: return "connecting"
+        case .connected: return "connected"
+        case .reasserting: return "reasserting"
+        case .disconnecting: return "disconnecting"
+        @unknown default: return "unknown"
+        }
+    }
+
+    private func row(_ k: String, _ v: String, bad: Bool = false) -> some View {
+        HStack(alignment: .top) {
+            Text(k)
+                .font(.system(size: 13))
+                .foregroundColor(Theme.muted)
+            Spacer(minLength: 12)
+            Text(v)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(bad ? Color(hex: 0xFF8A8A) : .white)
+                .multilineTextAlignment(.trailing)
+        }
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Logo()
+                Text("Настройки")
+                    .font(.system(size: 34, weight: .bold))
+                    .kerning(-1)
+                    .foregroundColor(.white)
+
+                Toggle(isOn: $vpn.killSwitch) {
+                    Text("Блокировать трафик при обрыве")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(.white)
+                }
+                .tint(Theme.accent)
+                .disabled(vpn.isActive)
+                .card()
+
+                Text("Диагностика")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundColor(.white)
+                VStack(spacing: 10) {
+                    row("iOS", UIDevice.current.systemVersion)
+                    row("Статус VPN", statusName)
+                    row("Приложение", Bundle.main.bundleIdentifier ?? "—")
+                    row("Расширение (встроено)", vpn.embeddedExtensionID ?? "не найдено",
+                        bad: vpn.embeddedExtensionID == nil)
+                    row("App Group", AppGroup.available ? "доступна" : "недоступна",
+                        bad: !AppGroup.available)
+                    row("Лог расширения", AppGroup.available ? "виден" : "не виден (нужна App Group)")
+                    if let e = vpn.error { row("Последняя ошибка", e, bad: true) }
+                }
+                .card()
+
+                HStack {
+                    Text("Журнал")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundColor(.white)
+                    Spacer()
+                    Button { log = SharedLog.read() } label: {
+                        IconCircle(systemName: "arrow.clockwise")
+                    }
+                    .buttonStyle(.plain)
+                }
+                HStack(spacing: 10) {
+                    Button(copied ? "Скопировано" : "Копировать") {
+                        UIPasteboard.general.string = log
+                        copied = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
+                    }
+                    .buttonStyle(SecondaryButtonStyle())
+                    Button("Очистить") {
+                        SharedLog.clear()
+                        log = ""
+                    }
+                    .buttonStyle(SecondaryButtonStyle())
+                }
+                Text(log.isEmpty ? "Журнал пуст" : log)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(log.isEmpty ? Theme.muted : .white)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+                    .card()
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 12)
+            .padding(.bottom, 24)
+        }
+        .onAppear { log = SharedLog.read() }
+        .onChange(of: vpn.status) { _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { log = SharedLog.read() }
+        }
     }
 }
 
