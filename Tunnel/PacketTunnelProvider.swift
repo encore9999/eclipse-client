@@ -95,8 +95,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         guard let c = cfg else { throw TunnelError.badConfig }
         let dir = AppGroup.container.appendingPathComponent("xray", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        do { try XraybridgeStart(c.json, dir.path) }
-        catch { throw TunnelError.xray(error.localizedDescription) }
+        var nsErr: NSError?
+        if !XraybridgeStart(c.json, dir.path, &nsErr) {
+            throw TunnelError.xray(nsErr?.localizedDescription ?? "unknown")
+        }
         log("xray started")
     }
 
@@ -183,7 +185,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         monitor = m
     }
 
-    private func handle(_ path: NWPath) {
+    private func handle(_ path: Network.NWPath) {
         let ifs = [(NWInterface.InterfaceType.wifi, "w"), (.cellular, "c"), (.wiredEthernet, "e")]
             .filter { path.usesInterfaceType($0.0) }.map { $0.1 }.joined()
         let sig = "\(path.status)|\(ifs)"
