@@ -1,0 +1,29 @@
+name: Build unsigned ipa
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate project
+        run: xcodegen generate
+      - name: Build
+        run: |
+          xcodebuild -project VPNTest.xcodeproj -scheme VPNTest \
+            -sdk iphoneos -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build
+      - name: Package ipa
+        run: |
+          mkdir Payload
+          cp -R build/Build/Products/Release-iphoneos/VPNTest.app Payload/
+          zip -r VPNTest.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VPNTest-ipa
+          path: VPNTest.ipa
