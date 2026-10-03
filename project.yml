@@ -26,8 +26,6 @@ targets:
       properties:
         com.apple.developer.networking.networkextension:
           - packet-tunnel-provider
-        com.apple.security.application-groups:
-          - group.com.example.vpntest
     settings:
       base:
         # ЗАМЕНИТЕ на свой bundle ID (из профиля)
@@ -57,8 +55,6 @@ targets:
       properties:
         com.apple.developer.networking.networkextension:
           - packet-tunnel-provider
-        com.apple.security.application-groups:
-          - group.com.example.vpntest
     settings:
       base:
         # ДОЛЖЕН быть: bundle ID приложения + ".tunnel"
