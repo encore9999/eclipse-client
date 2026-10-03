@@ -1,0 +1,47 @@
+name: VPNTest
+options:
+  deploymentTarget:
+    iOS: "15.0"
+targets:
+  VPNTest:
+    type: application
+    platform: iOS
+    sources: [App]
+    dependencies:
+      - target: Tunnel
+    info:
+      path: App/Info.plist
+      properties:
+        UILaunchScreen: {}
+        CFBundleDisplayName: VPNTest
+    entitlements:
+      path: App/App.entitlements
+      properties:
+        com.apple.developer.networking.networkextension:
+          - packet-tunnel-provider
+    settings:
+      base:
+        # ЗАМЕНИТЕ на свой bundle ID (из профиля)
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.vpntest
+        SWIFT_VERSION: "5.0"
+  Tunnel:
+    type: app-extension
+    platform: iOS
+    sources: [Tunnel]
+    info:
+      path: Tunnel/Info.plist
+      properties:
+        CFBundleDisplayName: VPNTestTunnel
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider
+    entitlements:
+      path: Tunnel/Tunnel.entitlements
+      properties:
+        com.apple.developer.networking.networkextension:
+          - packet-tunnel-provider
+    settings:
+      base:
+        # ДОЛЖЕН быть: bundle ID приложения + ".tunnel"
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.vpntest.tunnel
+        SWIFT_VERSION: "5.0"
