@@ -41,21 +41,23 @@ struct RootView: View {
     @State private var tab = 0
 
     var body: some View {
-        ZStack {
-            AppBackground()
-            TabView(selection: $tab) {
-                HomeView(onPickServer: { tab = 1 })
-                    .tabItem { Label("Главная", systemImage: "shield.lefthalf.filled") }
-                    .tag(0)
-                ServersView()
-                    .tabItem { Label("Серверы", systemImage: "globe") }
-                    .tag(1)
-                SettingsView()
-                    .tabItem { Label("Настройки", systemImage: "gearshape") }
-                    .tag(2)
-            }
-            .accentColor(Theme.accentLight)
+        // Фон рисуем внутри каждой вкладки: TabView в новых iOS закрашивает
+        // свою область системным (чёрным) фоном и перекрывает фон снаружи.
+        TabView(selection: $tab) {
+            HomeView(onPickServer: { tab = 1 })
+                .background(AppBackground())
+                .tabItem { Label("Главная", systemImage: "shield.lefthalf.filled") }
+                .tag(0)
+            ServersView()
+                .background(AppBackground())
+                .tabItem { Label("Серверы", systemImage: "globe") }
+                .tag(1)
+            SettingsView()
+                .background(AppBackground())
+                .tabItem { Label("Настройки", systemImage: "gearshape") }
+                .tag(2)
         }
+        .accentColor(Theme.accentLight)
         .onAppear {
             vpn.load()
             Task { await store.autoRefresh() }
