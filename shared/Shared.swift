@@ -27,6 +27,29 @@ enum TunnelKeys {
     static let serverHost = "serverHost"
     static let serverPort = "serverPort"
     static let lastError = "tunnel.lastError"
+    static let options = "options"
+}
+
+// Опции туннеля: приложение -> расширение (JSON-строкой в providerConfiguration)
+struct TunnelOptions: Codable, Equatable {
+    var dns: [String] = ["1.1.1.1", "1.0.0.1"]
+    var mtu: Int = 1400
+    var mux = false
+    var fragment = false
+    var sniffing = true
+    var bypassLAN = true
+    var directRules: [String] = []   // домены, IP или CIDR — идут мимо прокси
+
+    var json: String {
+        guard let d = try? JSONEncoder().encode(self) else { return "{}" }
+        return String(decoding: d, as: UTF8.self)
+    }
+
+    static func from(json: String?) -> TunnelOptions {
+        guard let j = json, let d = j.data(using: .utf8),
+              let o = try? JSONDecoder().decode(TunnelOptions.self, from: d) else { return TunnelOptions() }
+        return o
+    }
 }
 
 enum SharedLog {
