@@ -29,6 +29,30 @@ jobs:
             -o ../Frameworks/Xray.xcframework ./xraybridge
           ls -la ../Frameworks
 
+      - name: Prepare app icon
+        run: |
+          set -e
+          ICON=$(find . -name 'icon-1024.png' -not -path './build/*' | head -n 1)
+          if [ -z "$ICON" ]; then echo "icon-1024.png не найден в репозитории"; exit 1; fi
+          echo "Иконка: $ICON"
+          D=App/Assets.xcassets/AppIcon.appiconset
+          mkdir -p "$D"
+          if [ "$(realpath "$ICON")" != "$(realpath "$D/icon-1024.png" 2>/dev/null || echo none)" ]; then
+            cp "$ICON" "$D/icon-1024.png"
+          fi
+          cat > App/Assets.xcassets/Contents.json <<'EOF'
+          { "info" : { "author" : "xcode", "version" : 1 } }
+          EOF
+          cat > "$D/Contents.json" <<'EOF'
+          {
+            "images" : [
+              { "filename" : "icon-1024.png", "idiom" : "universal", "platform" : "ios", "size" : "1024x1024" }
+            ],
+            "info" : { "author" : "xcode", "version" : 1 }
+          }
+          EOF
+          find App/Assets.xcassets -type f
+
       - name: Install XcodeGen
         run: brew install xcodegen
 
