@@ -2,11 +2,17 @@ name: VPNTest
 options:
   deploymentTarget:
     iOS: "15.0"
+
+packages:
+  Tun2SocksKit:
+    url: https://github.com/EbrahimTahernejad/Tun2SocksKit
+    branch: main   # после первой успешной сборки зафиксируйте тег/ревизию
+
 targets:
   VPNTest:
     type: application
     platform: iOS
-    sources: [App]
+    sources: [App, Shared]
     dependencies:
       - target: Tunnel
     info:
@@ -20,15 +26,25 @@ targets:
       properties:
         com.apple.developer.networking.networkextension:
           - packet-tunnel-provider
+        com.apple.security.application-groups:
+          - group.com.example.vpntest
     settings:
       base:
         # ЗАМЕНИТЕ на свой bundle ID (из профиля)
         PRODUCT_BUNDLE_IDENTIFIER: com.example.vpntest
         SWIFT_VERSION: "5.0"
+
   Tunnel:
     type: app-extension
     platform: iOS
-    sources: [Tunnel]
+    sources: [Tunnel, Shared]
+    dependencies:
+      # gomobile-фреймворк статический, поэтому не встраиваем
+      - framework: Frameworks/Xray.xcframework
+        embed: false
+        link: true
+      - package: Tun2SocksKit
+      - sdk: libresolv.tbd   # нужен Go-рантайму
     info:
       path: Tunnel/Info.plist
       properties:
@@ -41,6 +57,8 @@ targets:
       properties:
         com.apple.developer.networking.networkextension:
           - packet-tunnel-provider
+        com.apple.security.application-groups:
+          - group.com.example.vpntest
     settings:
       base:
         # ДОЛЖЕН быть: bundle ID приложения + ".tunnel"
