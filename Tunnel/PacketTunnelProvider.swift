@@ -43,7 +43,6 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     override func startTunnel(options: [String: NSObject]?, completionHandler: @escaping (Error?) -> Void) {
         AppGroup.defaults.removeObject(forKey: TunnelKeys.lastError)
-        SharedLog.clear()
         stopping = false
         log("startTunnel, xray \(XraybridgeVersion())")
 
