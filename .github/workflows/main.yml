@@ -1,29 +1,52 @@
 name: Build unsigned ipa
-on:
-  push:
-  workflow_dispatch:
+on: push
+
 jobs:
   build:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Build Xray.xcframework
+        run: |
+          cd xray
+          [ -f go.mod ] || go mod init example.com/xrayroot
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+          export PATH=$PATH:$(go env GOPATH)/bin
+          gomobile init
+          go get github.com/xtls/xray-core@latest
+          go get golang.org/x/mobile/bind
+          go mod tidy
+          mkdir -p ../Frameworks
+          gomobile bind -target=ios -iosversion=15.0 -trimpath \
+            -ldflags="-s -w" \
+            -o ../Frameworks/Xray.xcframework ./xraybridge
+          ls -la ../Frameworks
+
       - name: Install XcodeGen
         run: brew install xcodegen
+
       - name: Generate project
         run: xcodegen generate
+
       - name: Build
         run: |
           xcodebuild -project VPNTest.xcodeproj -scheme VPNTest \
-            -sdk iphoneos -configuration Release \
-            -derivedDataPath build \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-            build
-      - name: Package ipa
+            -sdk iphoneos -configuration Release -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= build
+
+      - name: Package unsigned IPA
         run: |
-          mkdir Payload
+          mkdir -p Payload
           cp -R build/Build/Products/Release-iphoneos/VPNTest.app Payload/
-          zip -r VPNTest.ipa Payload
+          zip -r VPNTest-unsigned.ipa Payload
+
       - uses: actions/upload-artifact@v4
         with:
-          name: VPNTest-ipa
-          path: VPNTest.ipa
+          name: VPNTest-unsigned-ipa
+          path: VPNTest-unsigned.ipa
