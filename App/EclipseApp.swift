@@ -5,9 +5,8 @@ import AVFoundation
 import PhotosUI
 import CoreImage
 
-// Server, LinkParser, Pinger, AppGroup, TunnelKeys, SharedLog и XrayConfigBuilder
+// Server, LinkParser, Pinger, AppGroup, TunnelKeys, SharedLog, GeoDat и XrayConfigBuilder
 // лежат в папке Shared/ (компилируются и в приложение, и в расширение).
-// GeoDat.swift также положи в папку Shared/ или в основную группу проекта.
 
 // MARK: - EclipseApp.swift
 
@@ -42,8 +41,6 @@ struct RootView: View {
     @State private var tab = 0
 
     var body: some View {
-        // Фон рисуем внутри каждой вкладки: TabView в новых iOS закрашивает
-        // свою область системным (чёрным) фоном и перекрывает фон снаружи.
         TabView(selection: $tab) {
             HomeView(onPickServer: { tab = 1 })
                 .background(AppBackground())
@@ -90,7 +87,7 @@ enum Theme {
     static let muted = Color(hex: 0x9B90CC)
 }
 
-// MARK: - Фон (как на сайте): свечение, волнистые линии, вращающиеся 3D-кубы
+// MARK: - Фон
 
 struct AppBackground: View {
     @EnvironmentObject var vpn: VPNController
@@ -120,7 +117,6 @@ struct AppBackground: View {
                 }
             }
             SceneCanvas(connected: vpn.status == .connected)
-            // затемнение: общий слой + «тёмное пятно» в центре, где основной текст
             Color.black.opacity(0.22)
             RadialGradient(colors: [Color.black.opacity(0.40), .clear],
                            center: .center, startRadius: 0, endRadius: 340)
@@ -149,19 +145,17 @@ private struct SeededRNG {
     }
 }
 
-// Скорость вращения кубов: медленно до подключения, разгон при подключении, затем плавное замедление.
-// Значения — множители к скорости с сайта (1.0 = как на странице входа). Меняйте под вкус.
 final class SceneMotion {
     static let shared = SceneMotion()
-    static let idle = 0.25      // не подключено
-    static let peak = 5.0       // пик сразу после подключения
-    static let cruise = 0.7     // куда замедляется после разгона
-    static let rampTime = 1.4   // сколько секунд держим разгон
-    static let rampTau = 0.55   // как быстро разгоняемся
-    static let settleTau = 3.5  // как плавно замедляемся
-    static let idleTau = 1.5    // как плавно тормозим после отключения
+    static let idle = 0.25
+    static let peak = 5.0
+    static let cruise = 0.7
+    static let rampTime = 1.4
+    static let rampTau = 0.55
+    static let settleTau = 3.5
+    static let idleTau = 1.5
 
-    private var phase = 0.0     // накопленное «время вращения»
+    private var phase = 0.0
     private var speed = SceneMotion.idle
     private var last: Double?
     private var connectedAt: Double?
@@ -188,13 +182,12 @@ final class SceneMotion {
 
 struct SceneCanvas: View {
     var connected: Bool = false
-    // параметры взяты из страницы входа: 16 линий и 5 кубов
     private static let lines: [WaveLine] = {
         var r = SeededRNG(state: 20260404)
         return (0..<16).map { i in
             WaveLine(yFrac: Double(i) / 16, yJitter: r.next() * 15,
                      phase: r.next() * 2 * Double.pi,
-                     speed: (0.0025 + r.next() * 0.004) * 60,     // рад/с (60 к/с в оригинале)
+                     speed: (0.0025 + r.next() * 0.004) * 60,
                      amp: 16 + r.next() * 35,
                      freq: 0.0035 + r.next() * 0.003,
                      opacity: 0.04 + r.next() * 0.08)
@@ -239,7 +232,6 @@ struct SceneCanvas: View {
         }
     }
 
-    // Куб: настоящее вращение в 3D + перспектива 900 (как perspective:900px в CSS)
     private static func rotate(_ v: (Double, Double, Double),
                                _ ax: Double, _ ay: Double, _ az: Double) -> (Double, Double, Double) {
         var (x, y, z) = v
@@ -258,7 +250,7 @@ struct SceneCanvas: View {
         let signs: [(Double, Double, Double)] = [(-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1),
                                                   (-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1)]
         let faces: [[Int]] = [[0, 1, 2, 3], [4, 5, 6, 7], [0, 1, 5, 4], [3, 2, 6, 7], [0, 3, 7, 4], [1, 2, 6, 5]]
-        let count = size.width < 700 ? 3 : cubes.count      // как на сайте: на телефоне только 3 куба
+        let count = size.width < 700 ? 3 : cubes.count
 
         for (i, c) in cubes.prefix(count).enumerated() {
             let fp = (t + Double(i) * 1.3) / c.floatDur
@@ -277,7 +269,6 @@ struct SceneCanvas: View {
                 let k = persp / (persp - r.2)
                 pts.append((CGPoint(x: ox + (cx + r.0 - ox) * k, y: oy + (cy + r.1 - oy) * k), r.2))
             }
-            // дальние грани рисуем первыми
             let order = faces.sorted { a, b in
                 a.map { pts[$0].1 }.reduce(0, +) < b.map { pts[$0].1 }.reduce(0, +)
             }
@@ -338,7 +329,6 @@ extension View {
 }
 
 extension View {
-    // лёгкая тень под текстом, который лежит прямо на анимированном фоне
     func legible() -> some View {
         shadow(color: .black.opacity(0.65), radius: 6, x: 0, y: 1)
     }
@@ -391,14 +381,12 @@ struct IconCircle: View {
 
 // MARK: - Store.swift
 
-// Подписка (группа серверов). url пустой у группы «Мои серверы» (одиночные ссылки).
 struct SubGroup: Identifiable, Codable, Equatable {
     var id = UUID()
     var name: String
     var url: String
     var servers: [Server] = []
     var updatedAt: Date?
-    // из заголовков подписки
     var used: Int64?
     var total: Int64?
     var expire: Date?
@@ -411,14 +399,13 @@ final class Store: ObservableObject {
     @Published var selectedID: UUID? { didSet { save() } }
     @Published var refreshing: Set<UUID> = []
     @Published var pingingGroups: Set<UUID> = []
-    @Published var pings: [UUID: Int] = [:]   // мс, -1 = нет ответа
+    @Published var pings: [UUID: Int] = [:]
     @Published var message: String?
 
     private struct Saved: Codable {
         var groups: [SubGroup]
         var selectedID: UUID?
     }
-    // формат прошлой версии, для переноса данных
     private struct OldSaved: Codable {
         var servers: [Server]
         var selectedID: UUID?
@@ -482,7 +469,6 @@ final class Store: ObservableObject {
         selectedID = server.id
     }
 
-    // Принимает ссылку подписки (в т.ч. из QR) или одиночную ссылку сервера
     @MainActor
     func add(_ input: String) async -> Bool {
         message = nil
@@ -491,7 +477,6 @@ final class Store: ObservableObject {
             addManual(single)
             return true
         }
-        // обёртки вида happ://add/https%3A//... — достаём саму http(s)-ссылку
         let decoded = text.removingPercentEncoding ?? text
         for p in ["https://", "http://"] {
             if let r = decoded.range(of: p) {
@@ -545,7 +530,6 @@ final class Store: ObservableObject {
             }
             guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return false }
             let old = groups[i].servers
-            // сохраняем id у прежних серверов, чтобы не терялись выбор и пинг
             parsed = parsed.map { (item: Server) -> Server in
                 var n = item
                 if let o = old.first(where: { $0.link == item.link }) { n.id = o.id }
@@ -567,7 +551,7 @@ final class Store: ObservableObject {
                 selectedID = allServers.first(where: { $0.link == selectedLink })?.id ?? allServers.first?.id
             }
 
-            // === Скачивание гео-баз при первой успешной загрузке подписки ===
+            // Фоновое скачивание гео-баз при первой успешной загрузке подписки
             if !GeoDat.available {
                 Task.detached(priority: .utility) {
                     do {
@@ -597,7 +581,6 @@ final class Store: ObservableObject {
 
     struct UserInfo { var used: Int64?; var total: Int64?; var expire: Date? }
 
-    // "upload=0; download=123; total=1073741824; expire=1735689600"
     static func parseUserInfo(_ header: String?) -> UserInfo {
         var u = UserInfo()
         guard let header = header else { return u }
@@ -617,7 +600,6 @@ final class Store: ObservableObject {
         return u
     }
 
-    // Автообновление подписок при запуске (если включено в настройках)
     @MainActor
     func autoRefresh() async {
         let s = AppSettings.shared
@@ -659,9 +641,9 @@ final class VPNController: ObservableObject {
     }
     private var manager: NETunnelProviderManager?
     private var previous: NEVPNStatus = .disconnected
-    private var sawActive = false      // в этой сессии было подключение/попытка
-    private var userStopped = false    // отключил сам пользователь
-    private var pendingServer: Server?  // сервер, на который переключаемся
+    private var sawActive = false
+    private var userStopped = false
+    private var pendingServer: Server?
 
     init() {
         NotificationCenter.default.addObserver(
@@ -681,7 +663,6 @@ final class VPNController: ObservableObject {
                 self.sawActive = false
                 if !self.userStopped { self.collectError(conn) }
             }
-            // смена сервера на лету: старый туннель остановился — поднимаем новый
             if new == .disconnected, let next = self.pendingServer {
                 self.pendingServer = nil
                 self.start(next)
@@ -689,7 +670,6 @@ final class VPNController: ObservableObject {
         }
     }
 
-    // Ошибка, с которой остановилось расширение: сначала App Group, затем системная
     private func collectError(_ conn: NEVPNConnection) {
         let d = AppGroup.defaults
         if let msg = d.string(forKey: TunnelKeys.lastError) {
@@ -717,7 +697,6 @@ final class VPNController: ObservableObject {
         }
     }
 
-    // Реально встроенное расширение (если сервис подписи переименовал бандлы)
     var embeddedExtensionID: String? {
         guard let url = Bundle.main.builtInPlugInsURL,
               let items = try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil),
@@ -749,7 +728,6 @@ final class VPNController: ObservableObject {
     private func stopTunnel() {
         userStopped = true
         if let m = manager, m.isOnDemandEnabled {
-            // иначе on-demand сразу поднимет туннель обратно
             m.isOnDemandEnabled = false
             m.saveToPreferences { _ in m.connection.stopVPNTunnel() }
         } else {
@@ -757,7 +735,6 @@ final class VPNController: ObservableObject {
         }
     }
 
-    // Выбор другого сервера при активном подключении: перезапускаем туннель
     func switchServer(_ server: Server) {
         guard isActive else { return }
         SharedLog.write("[app] смена сервера → \(server.host):\(server.port)")
@@ -785,8 +762,6 @@ final class VPNController: ObservableObject {
         sawActive = false
         SharedLog.clear()
         SharedLog.write("[app] старт: \(server.protocolLabel) \(server.host):\(server.port)")
-        // Конфиг строим в приложении: ошибки ссылки видны до старта туннеля.
-        // logPath = nil: путь в песочнице приложения расширению недоступен.
         let profile: XrayProfile
         do {
             profile = try XrayConfigBuilder.build(for: server, options: AppSettings.shared.tunnelOptions, logPath: nil)
@@ -812,13 +787,11 @@ final class VPNController: ObservableObject {
                 TunnelKeys.serverPort: server.port,
                 TunnelKeys.options: AppSettings.shared.tunnelOptions.json
             ]
-            // Kill-switch средствами iOS: при падении туннеля трафик блокируется
             proto.includeAllNetworks = self.killSwitch
             proto.excludeLocalNetworks = true
             m.protocolConfiguration = proto
             m.localizedDescription = "Eclipse"
             m.isEnabled = true
-            // Автоподключение: iOS сама поднимает туннель при появлении сети
             let onDemand = AppSettings.shared.onDemand
             m.isOnDemandEnabled = onDemand
             m.onDemandRules = onDemand ? [NEOnDemandRuleConnect() as NEOnDemandRule] : []
@@ -845,7 +818,7 @@ final class VPNController: ObservableObject {
     }
 }
 
-// MARK: - HomeView.swift (в стиле Happ: подписки прямо на главном)
+// MARK: - HomeView.swift (в стиле Happ)
 
 struct HomeView: View {
     @EnvironmentObject var store: Store
@@ -988,10 +961,8 @@ struct HomeView: View {
                         .padding(.top, 8)
                 }
 
-                // Список групп и серверов прямо на главном экране
                 ForEach(store.groups) { g in
                     VStack(alignment: .leading, spacing: 10) {
-                        // Заголовок подписки
                         VStack(alignment: .leading, spacing: 6) {
                             HStack(spacing: 8) {
                                 Text(g.name)
@@ -1037,7 +1008,6 @@ struct HomeView: View {
                         }
                         .card()
 
-                        // Серверы внутри подписки
                         ForEach(sorted(g)) { s in
                             Button { pick(s) } label: {
                                 ServerRow(server: s,
@@ -1187,7 +1157,7 @@ enum UAPreset: String, CaseIterable, Identifiable {
     }
     var value: String {
         switch self {
-        case .eclipse, .custom: return "Eclipse/1.0"
+        case .eclipse, .custom: return "Eclipse/1.1"
         case .happ: return "Happ/3.0.0"
         case .v2rayn: return "v2rayN/7.0"
         }
@@ -1198,26 +1168,19 @@ final class AppSettings: ObservableObject {
     static let shared = AppSettings()
     private static let keyPrefix = "eclipse.s."
 
-    // подключение
     @Published var onDemand: Bool { didSet { save(onDemand, "onDemand") } }
     @Published var mtu: Int { didSet { save(mtu, "mtu") } }
-    // DNS
     @Published var dnsPreset: DNSPreset { didSet { save(dnsPreset.rawValue, "dnsPreset") } }
     @Published var customDNS: String { didSet { save(customDNS, "customDNS") } }
-    // маршрутизация
     @Published var bypassLAN: Bool { didSet { save(bypassLAN, "bypassLAN") } }
     @Published var directRules: String { didSet { save(directRules, "directRules") } }
-    // гео-маршрутизация
     @Published var useGeoRouting: Bool { didSet { save(useGeoRouting, "useGeoRouting") } }
     @Published var geoipDirect: String { didSet { save(geoipDirect, "geoipDirect") } }
     @Published var geositeDirect: String { didSet { save(geositeDirect, "geositeDirect") } }
-    // ядро
     @Published var sniffing: Bool { didSet { save(sniffing, "sniffing") } }
     @Published var mux: Bool { didSet { save(mux, "mux") } }
     @Published var fragment: Bool { didSet { save(fragment, "fragment") } }
-    // производительность
     @Published var memoryLimit: Int { didSet { save(memoryLimit, "memoryLimit") } }
-    // подписки
     @Published var autoUpdate: Bool { didSet { save(autoUpdate, "autoUpdate") } }
     @Published var updateHours: Int { didSet { save(updateHours, "updateHours") } }
     @Published var requestTimeout: Int { didSet { save(requestTimeout, "requestTimeout") } }
@@ -1269,8 +1232,6 @@ final class AppSettings: ObservableObject {
         uaPreset = .eclipse; customUA = ""; sendHWID = false; sortByPing = false
     }
 
-    // MARK: производные значения
-
     static func isIP(_ s: String) -> Bool {
         var a = in_addr(), b = in6_addr()
         return inet_pton(AF_INET, s, &a) == 1 || inet_pton(AF_INET6, s, &b) == 1
@@ -1292,7 +1253,7 @@ final class AppSettings: ObservableObject {
         o.fragment = fragment
         o.sniffing = sniffing
         o.bypassLAN = bypassLAN
-        o.memoryLimit = memoryLimit   // <- передаём лимит памяти в расширение
+        o.memoryLimit = memoryLimit
 
         var rules = directRules
             .components(separatedBy: .newlines)
@@ -1334,7 +1295,6 @@ final class AppSettings: ObservableObject {
         }
     }
 
-    // Заголовки запроса подписки (HWID — как у Happ: нужен провайдерам с привязкой к устройству)
     func apply(to req: inout URLRequest) {
         req.timeoutInterval = TimeInterval(requestTimeout)
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
@@ -1469,8 +1429,8 @@ struct SettingsView: View {
     }
 
     private var version: String {
-        let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
-        let b = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
+        let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.1"
+        let b = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "2"
         return "\(v) (\(b))"
     }
 
@@ -1611,7 +1571,7 @@ struct SettingsView: View {
                     MenuRow(title: "User-Agent", selection: $settings.uaPreset,
                             options: UAPreset.allCases.map { ($0, $0.title) })
                     if settings.uaPreset == .custom {
-                        SettingsField(placeholder: "Например, MyClient/1.0", text: $settings.customUA)
+                        SettingsField(placeholder: "Например, MyClient/1.1", text: $settings.customUA)
                     }
                     ToggleRow(title: "Отправлять HWID",
                               subtitle: "Заголовки x-hwid и данные об устройстве",
@@ -1804,8 +1764,8 @@ struct GroupSection: View {
     private var serversSorted: [Server] {
         guard settings.sortByPing else { return group.servers }
         func key(_ p: Int?) -> Int {
-            guard let p = p else { return Int.max - 1 }   // без замера — после рабочих
-            return p < 0 ? Int.max : p                    // недоступные — в конец
+            guard let p = p else { return Int.max - 1 }
+            return p < 0 ? Int.max : p
         }
         return group.servers.sorted { key(store.pings[$0.id]) < key(store.pings[$1.id]) }
     }
@@ -2149,7 +2109,6 @@ final class ScannerVC: UIViewController, AVCaptureMetadataOutputObjectsDelegate 
     }
 }
 
-// Выбор QR из галереи (скриншот подписки)
 struct PhotoQRPicker: UIViewControllerRepresentable {
     var onCode: (String?) -> Void
 
