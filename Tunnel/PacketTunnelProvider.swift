@@ -96,6 +96,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         guard let c = cfg else { throw TunnelError.badConfig }
         let dir = AppGroup.container.appendingPathComponent("xray", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        // Лимит памяти ядра: значение из настроек (МБ).
+        // Реально применяется только если Go-мост экспортирует XraybridgeSetMemoryLimit.
+        // XraybridgeSetMemoryLimit(Int32(c.opts.memoryLimit))
+        log("xray memoryLimit=\(c.opts.memoryLimit) МБ")
+
         var nsErr: NSError?
         if !XraybridgeStart(c.json, dir.path, &nsErr) {
             throw TunnelError.xray(nsErr?.localizedDescription ?? "unknown")
