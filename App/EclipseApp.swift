@@ -7,6 +7,7 @@ import CoreImage
 
 // Server, LinkParser, Pinger, AppGroup, TunnelKeys, SharedLog и XrayConfigBuilder
 // лежат в папке Shared/ (компилируются и в приложение, и в расширение).
+// GeoDat.swift также положи в папку Shared/ или в основную группу проекта.
 
 // MARK: - EclipseApp.swift
 
@@ -565,6 +566,22 @@ final class Store: ObservableObject {
             if !allServers.contains(where: { $0.id == selectedID }) {
                 selectedID = allServers.first(where: { $0.link == selectedLink })?.id ?? allServers.first?.id
             }
+
+            // === Скачивание гео-баз при первой успешной загрузке подписки ===
+            if !GeoDat.available {
+                Task.detached(priority: .utility) {
+                    do {
+                        try await GeoDat.download(
+                            ip: "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat",
+                            site: "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
+                        )
+                        SharedLog.write("[app] Гео-базы успешно скачаны")
+                    } catch {
+                        SharedLog.write("[app] Ошибка скачивания гео-баз: \(error.localizedDescription)")
+                    }
+                }
+            }
+
             return true
         } catch {
             message = "Ошибка загрузки: \(error.localizedDescription)"
@@ -828,13 +845,16 @@ final class VPNController: ObservableObject {
     }
 }
 
-// MARK: - HomeView.swift
+// MARK: - HomeView.swift (в стиле Happ: подписки прямо на главном)
 
 struct HomeView: View {
     @EnvironmentObject var store: Store
     @EnvironmentObject var vpn: VPNController
+    @EnvironmentObject var settings: AppSettings
     var onPickServer: () -> Void
-    @State private var showPicker = false
+
+    @State private var showAdd = false
+    @State private var showScan = false
 
     private var connected: Bool { vpn.status == .connected }
 
@@ -848,97 +868,208 @@ struct HomeView: View {
         }
     }
 
+    private func sorted(_ g: SubGroup) -> [Server] {
+        guard settings.sortByPing else { return g.servers }
+        func key(_ p: Int?) -> Int {
+            guard let p = p else { return Int.max - 1 }
+            return p < 0 ? Int.max : p
+        }
+        return g.servers.sorted { key(store.pings[$0.id]) < key(store.pings[$1.id]) }
+    }
+
+    private func pick(_ s: Server) {
+        let changed = store.selected?.id != s.id
+        store.selectedID = s.id
+        if changed && vpn.isActive { vpn.switchServer(s) }
+    }
+
+    private func fmt(_ b: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: b, countStyle: .binary)
+    }
+
+    private func trafficText(_ g: SubGroup) -> String? {
+        var parts: [String] = []
+        if let t = g.total { parts.append("\(fmt(g.used ?? 0)) / \(fmt(t))") }
+        else if let u = g.used { parts.append("исп. \(fmt(u))") }
+        if let e = g.expire {
+            let f = DateFormatter()
+            f.locale = Locale(identifier: "ru_RU")
+            f.dateStyle = .short
+            parts.append(e < Date() ? "истекла \(f.string(from: e))" : "до \(f.string(from: e))")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    private func trafficFraction(_ g: SubGroup) -> Double? {
+        guard let t = g.total, t > 0 else { return nil }
+        return min(1, Double(g.used ?? 0) / Double(t))
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            Logo()
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                Logo()
 
-            Spacer()
-
-            VStack(spacing: 14) {
-                Button {
-                    vpn.toggle(server: store.selected)
-                } label: {
-                    ZStack {
-                        Circle()
-                            .fill(Theme.accent.opacity(connected ? 0.35 : 0.12))
-                            .frame(width: 230, height: 230)
-                            .blur(radius: 30)
-                        Circle()
-                            .stroke(Theme.accentLight.opacity(0.35), lineWidth: 1)
-                            .frame(width: 190, height: 190)
-                        Circle()
-                            .fill(connected
-                                  ? AnyShapeStyle(LinearGradient(colors: [Theme.accent, Theme.accentDark],
-                                                                 startPoint: .top, endPoint: .bottom))
-                                  : AnyShapeStyle(Theme.card))
-                            .overlay(Circle().stroke(Theme.accent, lineWidth: 1.5))
-                            .frame(width: 150, height: 150)
-                        Image(systemName: "power")
-                            .font(.system(size: 52, weight: .semibold))
-                            .foregroundColor(connected ? .white : Theme.accentLight)
-                    }
-                }
-                .buttonStyle(.plain)
-
-                Text(statusText)
-                    .font(.system(size: 20, weight: .semibold))
-                    .foregroundColor(.white)
-                    .legible()
-
-                if let err = vpn.error {
-                    Text(err)
-                        .font(.system(size: 13))
-                        .foregroundColor(Color(hex: 0xFF8A8A))
-                        .multilineTextAlignment(.center)
-                }
-
-            }
-            .frame(maxWidth: .infinity)
-
-            Spacer()
-
-            Button(action: { showPicker = true }) {
-                HStack {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(store.selected?.name ?? "Сервер не выбран")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundColor(.white)
-                            .lineLimit(1)
-                        if let s = store.selected {
-                            Text(s.protocolLabel)
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundColor(Theme.accentLight)
-                            HStack(spacing: 6) {
-                                if let t = s.transportLabel { Chip(text: t) }
-                                if let sec = s.securityLabel { Chip(text: sec) }
-                            }
-                        } else {
-                            Text("Добавьте подписку на вкладке «Серверы»")
-                                .font(.system(size: 12))
-                                .foregroundColor(Theme.muted)
-                                .lineLimit(1)
+                // Кнопка подключения
+                VStack(spacing: 12) {
+                    Button {
+                        vpn.toggle(server: store.selected)
+                    } label: {
+                        ZStack {
+                            Circle()
+                                .fill(Theme.accent.opacity(connected ? 0.35 : 0.12))
+                                .frame(width: 180, height: 180)
+                                .blur(radius: 30)
+                            Circle()
+                                .stroke(Theme.accentLight.opacity(0.35), lineWidth: 1)
+                                .frame(width: 150, height: 150)
+                            Circle()
+                                .fill(connected
+                                      ? AnyShapeStyle(LinearGradient(colors: [Theme.accent, Theme.accentDark],
+                                                                     startPoint: .top, endPoint: .bottom))
+                                      : AnyShapeStyle(Theme.card))
+                                .overlay(Circle().stroke(Theme.accent, lineWidth: 1.5))
+                                .frame(width: 120, height: 120)
+                            Image(systemName: "power")
+                                .font(.system(size: 44, weight: .semibold))
+                                .foregroundColor(connected ? .white : Theme.accentLight)
                         }
                     }
-                    Spacer()
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(Theme.muted)
+                    .buttonStyle(.plain)
+
+                    Text(statusText)
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundColor(.white)
+                        .legible()
+
+                    if let err = vpn.error {
+                        Text(err)
+                            .font(.system(size: 12))
+                            .foregroundColor(Color(hex: 0xFF8A8A))
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal)
+                    }
                 }
-                .card()
+                .frame(maxWidth: .infinity)
+                .padding(.top, 4)
+
+                // Секция подписок (как в Happ)
+                HStack(spacing: 10) {
+                    Text("МОИ ПОДПИСКИ")
+                        .font(.system(size: 12, weight: .bold))
+                        .kerning(0.8)
+                        .foregroundColor(Theme.muted)
+                        .padding(.leading, 4)
+                    Spacer()
+                    Button {
+                        Task { await store.refreshAll() }
+                    } label: {
+                        IconCircle(systemName: "arrow.clockwise", busy: !store.refreshing.isEmpty)
+                    }
+                    .buttonStyle(.plain)
+                    Button {
+                        showScan = true
+                    } label: {
+                        IconCircle(systemName: "qrcode.viewfinder")
+                    }
+                    .buttonStyle(.plain)
+                    Button {
+                        showAdd = true
+                    } label: {
+                        IconCircle(systemName: "plus")
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                if store.groups.isEmpty {
+                    Text("Пока нет подписок. Нажмите «+», чтобы добавить, или отсканируйте QR-код.")
+                        .font(.system(size: 14))
+                        .foregroundColor(Theme.muted)
+                        .padding(.top, 8)
+                }
+
+                // Список групп и серверов прямо на главном экране
+                ForEach(store.groups) { g in
+                    VStack(alignment: .leading, spacing: 10) {
+                        // Заголовок подписки
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(spacing: 8) {
+                                Text(g.name)
+                                    .font(.system(size: 17, weight: .semibold))
+                                    .foregroundColor(.white)
+                                    .lineLimit(1)
+                                Spacer(minLength: 0)
+                                Button {
+                                    Task { await store.pingAll(g.id) }
+                                } label: {
+                                    IconCircle(systemName: "bolt.fill",
+                                               busy: store.pingingGroups.contains(g.id))
+                                }
+                                .buttonStyle(.plain)
+                                if !g.url.isEmpty {
+                                    Button {
+                                        Task { await store.refresh(g.id) }
+                                    } label: {
+                                        IconCircle(systemName: "arrow.clockwise",
+                                                   busy: store.refreshing.contains(g.id))
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                                Menu {
+                                    Button(role: .destructive) {
+                                        store.removeGroup(g.id)
+                                    } label: {
+                                        Label("Удалить подписку", systemImage: "trash")
+                                    }
+                                } label: {
+                                    IconCircle(systemName: "ellipsis")
+                                }
+                            }
+                            if let info = trafficText(g) {
+                                if let f = trafficFraction(g) {
+                                    ProgressView(value: f)
+                                        .tint(f > 0.9 ? Color(hex: 0xFB923C) : Theme.accent)
+                                }
+                                Text(info)
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundColor(Theme.muted)
+                            }
+                        }
+                        .card()
+
+                        // Серверы внутри подписки
+                        ForEach(sorted(g)) { s in
+                            Button { pick(s) } label: {
+                                ServerRow(server: s,
+                                          selected: store.selected?.id == s.id,
+                                          ping: store.pings[s.id])
+                            }
+                            .buttonStyle(.plain)
+                            .contextMenu {
+                                Button(role: .destructive) {
+                                    store.removeServer(s.id)
+                                } label: {
+                                    Label("Удалить", systemImage: "trash")
+                                }
+                            }
+                        }
+                    }
+                    .padding(.bottom, 8)
+                }
+
+                Button("Управление подписками") { onPickServer() }
+                    .buttonStyle(SecondaryButtonStyle())
+                    .padding(.top, 4)
             }
-            .buttonStyle(.plain)
+            .padding(.horizontal, 24)
+            .padding(.top, 12)
+            .padding(.bottom, 24)
         }
-        .padding(.horizontal, 24)
-        .padding(.top, 12)
-        .padding(.bottom, 12)
-        .sheet(isPresented: $showPicker) {
-            ServerPickerSheet(onManage: {
-                showPicker = false
-                onPickServer()
-            })
-            .environmentObject(store)
-            .environmentObject(vpn)
-            .environmentObject(AppSettings.shared)
+        .sheet(isPresented: $showAdd) {
+            AddSheet().environmentObject(store)
+        }
+        .fullScreenCover(isPresented: $showScan) {
+            ScanSheet().environmentObject(store)
         }
     }
 }
@@ -1076,10 +1207,16 @@ final class AppSettings: ObservableObject {
     // маршрутизация
     @Published var bypassLAN: Bool { didSet { save(bypassLAN, "bypassLAN") } }
     @Published var directRules: String { didSet { save(directRules, "directRules") } }
+    // гео-маршрутизация
+    @Published var useGeoRouting: Bool { didSet { save(useGeoRouting, "useGeoRouting") } }
+    @Published var geoipDirect: String { didSet { save(geoipDirect, "geoipDirect") } }
+    @Published var geositeDirect: String { didSet { save(geositeDirect, "geositeDirect") } }
     // ядро
     @Published var sniffing: Bool { didSet { save(sniffing, "sniffing") } }
     @Published var mux: Bool { didSet { save(mux, "mux") } }
     @Published var fragment: Bool { didSet { save(fragment, "fragment") } }
+    // производительность
+    @Published var memoryLimit: Int { didSet { save(memoryLimit, "memoryLimit") } }
     // подписки
     @Published var autoUpdate: Bool { didSet { save(autoUpdate, "autoUpdate") } }
     @Published var updateHours: Int { didSet { save(updateHours, "updateHours") } }
@@ -1105,9 +1242,13 @@ final class AppSettings: ObservableObject {
         customDNS = s("customDNS", "")
         bypassLAN = b("bypassLAN", true)
         directRules = s("directRules", "")
+        useGeoRouting = b("useGeoRouting", false)
+        geoipDirect = s("geoipDirect", "ru")
+        geositeDirect = s("geositeDirect", "category-ads-all")
         sniffing = b("sniffing", true)
         mux = b("mux", false)
         fragment = b("fragment", false)
+        memoryLimit = i("memoryLimit", 50)
         autoUpdate = b("autoUpdate", true)
         updateHours = i("updateHours", 12)
         requestTimeout = i("requestTimeout", 20)
@@ -1121,7 +1262,9 @@ final class AppSettings: ObservableObject {
         onDemand = false; mtu = 1400
         dnsPreset = .cloudflare; customDNS = ""
         bypassLAN = true; directRules = ""
+        useGeoRouting = false; geoipDirect = "ru"; geositeDirect = "category-ads-all"
         sniffing = true; mux = false; fragment = false
+        memoryLimit = 50
         autoUpdate = true; updateHours = 12; requestTimeout = 20
         uaPreset = .eclipse; customUA = ""; sendHWID = false; sortByPing = false
     }
@@ -1149,10 +1292,29 @@ final class AppSettings: ObservableObject {
         o.fragment = fragment
         o.sniffing = sniffing
         o.bypassLAN = bypassLAN
-        o.directRules = directRules
+        o.memoryLimit = memoryLimit   // <- передаём лимит памяти в расширение
+
+        var rules = directRules
             .components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
+
+        if useGeoRouting {
+            let ipRules = geoipDirect
+                .components(separatedBy: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+                .map { "geoip:\($0)" }
+            let siteRules = geositeDirect
+                .components(separatedBy: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+                .map { "geosite:\($0)" }
+            rules.append(contentsOf: ipRules)
+            rules.append(contentsOf: siteRules)
+        }
+
+        o.directRules = rules
         return o
     }
 
@@ -1381,6 +1543,27 @@ struct SettingsView: View {
                     .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.border, lineWidth: 1))
                 }
 
+                SettingsSection("Маршрутизация (Geo)",
+                                footer: "Автоматический обход по базам GeoIP/GeoSite. Укажите коды через запятую (например: ru, cn или category-ads-all, private). Базы скачиваются автоматически при первой загрузке подписки.") {
+                    ToggleRow(title: "Использовать GeoIP/GeoSite",
+                              subtitle: "Направлять трафик напрямую по базам",
+                              isOn: $settings.useGeoRouting)
+                    if settings.useGeoRouting {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("GeoIP напрямую")
+                                .font(.system(size: 12))
+                                .foregroundColor(Theme.muted)
+                            SettingsField(placeholder: "ru, cn", text: $settings.geoipDirect)
+                        }
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("GeoSite напрямую")
+                                .font(.system(size: 12))
+                                .foregroundColor(Theme.muted)
+                            SettingsField(placeholder: "category-ads-all, private", text: $settings.geositeDirect)
+                        }
+                    }
+                }
+
                 SettingsSection("Ядро",
                                 footer: "Mux и фрагментация могут увеличить расход памяти расширения. Включайте по необходимости.") {
                     ToggleRow(title: "Определять трафик (sniffing)",
@@ -1392,6 +1575,26 @@ struct SettingsView: View {
                     ToggleRow(title: "Фрагментация TLS",
                               subtitle: "Помогает обходить DPI-блокировки",
                               isOn: $settings.fragment)
+                }
+
+                SettingsSection("Производительность",
+                                footer: "Ограничение памяти для ядра Xray. Маленькое значение может привести к сбоям на слабых устройствах, большое — к повышенному расходу батареи.") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Лимит памяти")
+                                .font(.system(size: 15, weight: .medium))
+                                .foregroundColor(.white)
+                            Spacer()
+                            Text("\(settings.memoryLimit) МБ")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(Theme.accentLight)
+                        }
+                        Slider(value: Binding(
+                            get: { Double(settings.memoryLimit) },
+                            set: { settings.memoryLimit = Int($0) }
+                        ), in: 10...256, step: 10)
+                        .tint(Theme.accent)
+                    }
                 }
 
                 SettingsSection("Подписки",
@@ -1427,6 +1630,8 @@ struct SettingsView: View {
                     row("App Group", AppGroup.available ? "доступна" : "недоступна",
                         bad: !AppGroup.available)
                     row("Лог расширения", AppGroup.available ? "виден" : "не виден (нужна App Group)")
+                    row("Geo-базы", GeoDat.available ? "есть" : "нет",
+                        bad: !GeoDat.available)
                     if let e = vpn.error { row("Последняя ошибка", e, bad: true) }
                 }
 
