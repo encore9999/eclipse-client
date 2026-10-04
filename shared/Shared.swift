@@ -39,6 +39,7 @@ struct TunnelOptions: Codable, Equatable {
     var sniffing = true
     var bypassLAN = true
     var directRules: [String] = []   // домены, IP или CIDR — идут мимо прокси
+    var memoryLimit: Int = 50        // лимит памяти ядра Xray в МБ (Inscy-style)
 
     var json: String {
         guard let d = try? JSONEncoder().encode(self) else { return "{}" }
