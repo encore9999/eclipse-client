@@ -69,22 +69,50 @@ enum XrayConfigBuilder {
                            socksPort: socksPort, socksUser: user, socksPass: pass)
     }
 
-    // Прямые правила: домены (суффиксом) и IP/CIDR. geosite/geoip не поддерживаются (нет geo-файлов, экономим память).
+    // Прямые правила: домены (суффиксом), IP/CIDR, а также geoip:/geosite: (раскрываются через GeoDat).
     private static func routing(_ raw: [String]) -> [String: Any]? {
         var domains: [String] = [], ips: [String] = []
         let known = ["domain:", "full:", "keyword:", "regexp:"]
+
         for line in raw {
             let r = line.trimmingCharacters(in: .whitespaces)
             let low = r.lowercased()
-            if r.isEmpty || r.hasPrefix("#") || low.hasPrefix("geosite:") || low.hasPrefix("geoip:") { continue }
+            if r.isEmpty || r.hasPrefix("#") { continue }
+
+            // Гео-правила раскрываем через скачанные базы
+            if low.hasPrefix("geoip:") || low.hasPrefix("geosite:") {
+                let (gDomains, gIps) = expandGeo(r)
+                domains.append(contentsOf: gDomains)
+                ips.append(contentsOf: gIps)
+                continue
+            }
+
             if known.contains(where: { low.hasPrefix($0) }) { domains.append(r) }
             else if isIP(r) { ips.append(r) }
             else { domains.append("domain:" + low) }
         }
+
         var rules: [[String: Any]] = []
         if !domains.isEmpty { rules.append(["type": "field", "domain": domains, "outboundTag": "direct"]) }
         if !ips.isEmpty { rules.append(["type": "field", "ip": ips, "outboundTag": "direct"]) }
         return rules.isEmpty ? nil : ["domainStrategy": "AsIs", "rules": rules]
+    }
+
+    // "geoip:ru" -> ["5.8.0.0/16", ...], "geosite:category-ads-all" -> ["domain:example.com", ...]
+    // Лимиты защищают от раздувания JSON (десятки тысяч правил ломают старт туннеля).
+    private static func expandGeo(_ rule: String) -> (domains: [String], ips: [String]) {
+        let low = rule.lowercased()
+        if low.hasPrefix("geoip:") {
+            let code = String(rule.dropFirst("geoip:".count))
+            let cidrs = GeoDat.cidrs(code: code, limit: 4000) ?? []
+            return ([], cidrs)
+        }
+        if low.hasPrefix("geosite:") {
+            let code = String(rule.dropFirst("geosite:".count))
+            let doms = GeoDat.domains(code: code, limit: 2000) ?? []
+            return (doms, [])
+        }
+        return ([], [])
     }
 
     private static func isIP(_ s: String) -> Bool {
