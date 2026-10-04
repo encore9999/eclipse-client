@@ -39,7 +39,7 @@ struct TunnelOptions: Codable, Equatable {
     var sniffing = true
     var bypassLAN = true
     var directRules: [String] = []   // домены, IP или CIDR — идут мимо прокси
-    var memoryLimit: Int = 50        // лимит памяти ядра Xray в МБ (Inscy-style)
+    var memoryLimit: Int = 50        // лимит памяти ядра Xray в МБ
 
     var json: String {
         guard let d = try? JSONEncoder().encode(self) else { return "{}" }
@@ -87,8 +87,16 @@ struct Server: Identifiable, Codable, Equatable {
     var transport: String?
     var security: String?
 
-    // "VLESS + REALITY", "TROJAN + TLS", "VMESS"
+    // Поля для Hysteria 2
+    var hy2Auth: String?
+    var hy2Obfs: String?
+    var hy2ObfsPassword: String?
+    var hy2SNI: String?
+    var hy2Insecure: Bool = false
+
+    // "VLESS + REALITY", "TROJAN + TLS", "VMESS", "HYSTERIA2"
     var protocolLabel: String {
+        if proto == "hysteria2" { return "HYSTERIA 2" }
         let base = proto == "ss" ? "SHADOWSOCKS" : proto.uppercased()
         if let s = security, !s.isEmpty, s != "none" { return "\(base) + \(s.uppercased())" }
         return base
@@ -121,6 +129,7 @@ enum LinkParser {
         case "vless", "trojan": return parseURLStyle(s, proto: scheme)
         case "vmess": return parseVMess(s)
         case "ss": return parseSS(s)
+        case "hysteria2", "hy2": return parseHysteria2(s, proto: "hysteria2")
         default: return nil
         }
     }
@@ -135,7 +144,6 @@ enum LinkParser {
             .compactMap { parse($0) }
     }
 
-    // internal (не private): используются XrayConfigBuilder
     static func splitHostPort(_ hp: String) -> (String, Int)? {
         if hp.hasPrefix("["), let end = hp.firstIndex(of: "]") {
             let host = String(hp[hp.index(after: hp.startIndex)..<end])
@@ -215,6 +223,58 @@ enum LinkParser {
         guard let hp = hostPort, let (host, port) = splitHostPort(hp) else { return nil }
         return Server(name: name.isEmpty ? host : name, proto: "ss", host: host, port: port, link: s,
                       transport: "tcp", security: nil)
+    }
+
+    // Парсер Hysteria 2 (hysteria2://, hy2://)
+    // Структура: hysteria2://[auth@]hostname[:port]/?[key=value]&[key=value]...[#name]
+    private static func parseHysteria2(_ s: String, proto: String) -> Server? {
+        let (body, name) = splitFragment(s)
+        guard let sch = body.range(of: "://") else { return nil }
+        var rest = String(body[sch.upperBound...])
+
+        // Query parameters
+        var query: [String: String] = [:]
+        if let q = rest.firstIndex(of: "?") {
+            query = parseQuery(String(rest[rest.index(after: q)...]))
+            rest = String(rest[..<q])
+        }
+
+        // Убираем завершающий слэш
+        if rest.hasSuffix("/") { rest = String(rest.dropLast()) }
+
+        // Auth (userinfo) и host:port
+        var auth: String?
+        var hostPortPart: String
+
+        if let at = rest.lastIndex(of: "@") {
+            auth = String(rest[..<at])
+            hostPortPart = String(rest[rest.index(after: at)...])
+        } else {
+            // Если нет @, значит нет и auth
+            hostPortPart = rest
+        }
+
+        guard let (host, port) = splitHostPort(hostPortPart) else { return nil }
+
+        let obfs = query["obfs"]
+        let obfsPassword = query["obfs-password"]
+        let sni = query["sni"]
+        let insecure = query["insecure"] == "1" || query["insecure"]?.lowercased() == "true"
+
+        return Server(
+            name: name.isEmpty ? host : name,
+            proto: proto,
+            host: host,
+            port: port,
+            link: s,
+            transport: "hysteria2",
+            security: "tls",
+            hy2Auth: auth,
+            hy2Obfs: obfs,
+            hy2ObfsPassword: obfsPassword,
+            hy2SNI: sni,
+            hy2Insecure: insecure
+        )
     }
 }
 
