@@ -13,11 +13,23 @@ import (
 )
 
 var (
-	mu       sync.Mutex
-	instance *core.Instance
+	mu          sync.Mutex
+	instance    *core.Instance
+	memoryLimit int64 = 50 << 20 // по умолчанию 50 МБ
 )
 
-// Start запускает Xray из JSON. assetDir — каталог для geo-файлов (мы их не используем).
+// SetMemoryLimit — вызывается из Swift до Start().
+// mb — лимит памяти в мегабайтах. Если <= 0 — игнорируется.
+// Это ЖЁСТКИЙ лимит рантайма Go: при превышении процесс падает с fatal error.
+func SetMemoryLimit(mb int32) {
+	mu.Lock()
+	defer mu.Unlock()
+	if mb > 0 {
+		memoryLimit = int64(mb) << 20
+	}
+}
+
+// Start запускает Xray из JSON. assetDir — каталог для geo-файлов.
 func Start(config string, assetDir string) (err error) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -29,9 +41,12 @@ func Start(config string, assetDir string) (err error) {
 	if instance != nil {
 		return errors.New("xray already running")
 	}
-	// Лимит памяти для extension (~50 МБ на весь процесс)
+
+	// Лимит памяти для extension: берём из SetMemoryLimit (или 50 МБ по умолчанию).
+	// GC агрессивнее обычного — расширению iOS нельзя раздувать RSS.
 	debug.SetGCPercent(40)
-	debug.SetMemoryLimit(32 << 20)
+	debug.SetMemoryLimit(memoryLimit)
+
 	os.Setenv("XRAY_LOCATION_ASSET", assetDir)
 
 	inst, e := core.StartInstance("json", []byte(config))
