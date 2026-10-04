@@ -40,6 +40,7 @@
 - **VMess**
 - **Trojan**
 - **Shadowsocks**
+- **Hysteria2**
 
 ### Транспорты
 - TCP, WebSocket, gRPC, HTTP/2, HTTPUpgrade, xhttp
@@ -58,7 +59,7 @@
 
 ### Маршрутизация
 - Ручные правила по доменам, IP-адресам и подсетям
-- **GeoIP** и **GeoSite** — базы скачиваются автоматически
+- **GeoIP** и **GeoSite** - базы скачиваются автоматически
 - Обход локальных сетей
 - Определение трафика (sniffing) для маршрутизации по доменам
 - Стратегия `AsIs` / `IPIfNonMatch`
@@ -151,7 +152,7 @@
 
 - **Не устанавливается**: убедитесь, что профиль `.mobileprovision`
   привязан к тому же сертификату `.p12`, что Вы импортировали.
-- **Сертификат помечен как недействительный**: срок действия истёк —
+- **Сертификат помечен как недействительный**: срок действия истёк -
   обновите сертификат у поставщика.
 - **Приложение вылетает сразу после запуска**: отзовите сертификат
   у поставщика и подпишите `.ipa` заново.
@@ -205,7 +206,7 @@ Apple требует Apple Developer аккаунт ($99/год) для расп
 <summary><b>Через сколько сертификат перестанет работать?</b></summary>
 
 Срок действия зависит от сертификата. Обычно это 1 год для платных
-сертификатов. Если подпись перестала работать — подпишите `.ipa`
+сертификатов. Если подпись перестала работать - подпишите `.ipa`
 заново тем же способом.
 </details>
 
@@ -214,19 +215,18 @@ Apple требует Apple Developer аккаунт ($99/год) для расп
 <details>
 <summary><b>Где взять подписку на VPN?</b></summary>
 
-Eclipse — это клиент, а не сервис. Подписки (`vless://`, `vmess://`,
+Eclipse - это клиент, а не сервис. Подписки (`vless://`, `vmess://`,
 `trojan://`, `ss://`) предоставляют сторонние провайдеры. Рекомендуем
 выбирать проверенных поставщиков по отзывам.
 Рекомендуем https://t.me/encorevpn_bot/
 </details>
 
-<details>
 <summary><b>GeoIP/GeoSite не работает. Что проверить?</b></summary>
 
 Откройте **Настройки → Диагностика**. Строка **«Geo-базы»** должна
-показывать **«есть»**. Если **«нет»** — базы не скачались. Обычно
+показывать **«есть»**. Если **«нет»** - базы не скачались. Обычно
 это происходит при первом запуске без интернета. Удалите подписку
-и добавьте заново — базы скачаются автоматически.
+и добавьте заново 0 базы скачаются автоматически.
 </details>
 
 <details>
@@ -258,37 +258,36 @@ App Store.
 - [x] Настраиваемый лимит памяти ядра
 - [ ] Поддержка sing-box
 - [ ] Дополнительные pluggable-транспорты
-- [ ] Англоязычный интерфейс
 
 ---
 
 ## Технологии
 
 - **Swift 5** и **SwiftUI**
-- **Xray-core** — ядро прокси
-- **Tun2SocksKit** — туннелирование TCP/UDP через SOCKS5
-- **Go** и `gomobile` — сборка Xray в `.xcframework`
-- **XcodeGen** — генерация Xcode-проекта
-- **GitHub Actions** — CI для сборки ядра и приложения
+- **Xray-core** - ядро прокси
+- **Tun2SocksKit** - туннелирование TCP/UDP через SOCKS5
+- **Go** и `gomobile` - сборка Xray в `.xcframework`
+- **XcodeGen** - генерация Xcode-проекта
+- **GitHub Actions** - CI для сборки ядра и приложения
 
 ---
 
 ## Структура проекта
 
-eclipse-client/
-├── App/ # Основное приложение
-│ ├── EclipseApp.swift # UI, Store, VPNController, настройки
-│ └── Assets.xcassets
-├── Tunnel/ # Расширение VPN-туннеля
-│ └── PacketTunnelProvider.swift
-├── Shared/ # Общий код (приложение + расширение)
-│ ├── Shared.swift # Модели, парсер ссылок, пингер
-│ ├── XrayConfigBuilder.swift
-│ └── GeoDat.swift # Парсер geoip.dat / geosite.dat
-├── xray/xraybridge/ # Go-мост для Xray-core
-├── Frameworks/ # Собранный Xray.xcframework
-├── .github/workflows/ # CI
-└── project.yml # Конфиг XcodeGen
+eclipse-client/ 
+├── App/ # Основное приложение 
+│ ├── EclipseApp.swift # UI, Store, VPNController, настройки 
+│ └── Assets.xcassets 
+├── Tunnel/ # Расширение VPN-туннеля 
+│ └── PacketTunnelProvider.swift 
+├── Shared/ # Общий код (приложение + расширение) 
+│ ├── Shared.swift # Модели, парсер ссылок, пингер 
+│ ├── XrayConfigBuilder.swift 
+│ └── GeoDat.swift # Парсер geoip.dat / geosite.dat 
+├── xray/xraybridge/ # Go-мост для Xray-core 
+├── Frameworks/ # Собранный Xray.xcframework 
+├── .github/workflows/ # CI 
+└── project.yml # Конфиг XcodeGen 
 
 ---
 
@@ -299,7 +298,7 @@ eclipse-client/
 
 Перед созданием Issue:
 1. Проверьте, нет ли уже похожего обращения.
-2. Если это ошибка — приложите журнал из **Настройки → Журнал**.
+2. Если это ошибка - приложите журнал из **Настройки → Журнал**.
 3. Укажите модель iPhone, версию iOS и версию Eclipse.
 
 Мы также будем рады видеть Вас в нашем Telegram-канале:
@@ -313,14 +312,14 @@ Eclipse распространяется под лицензией **GPL-3.0**.
 
 Ядро [Xray-core](https://github.com/XTLS/Xray-core) используется под
 лицензией **MPL-2.0**. Библиотека
-[Tun2SocksKit](https://github.com/EbrahimTahernejad/Tun2SocksKit) —
+[Tun2SocksKit](https://github.com/EbrahimTahernejad/Tun2SocksKit) -
 под лицензией **MIT**.
 
 ---
 
 <div align="center">
 
-**Если Eclipse оказался Вам полезен — поставьте ⭐ репозиторию.
+**Если Eclipse оказался Вам полезен - поставьте ⭐ репозиторию.
 Это лучший способ поддержать проект.**
 
 </div>
