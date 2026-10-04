@@ -12,7 +12,7 @@ targets:
   Eclipse:
     type: application
     platform: iOS
-    sources: [App, Shared]   # App/Assets.xcassets (иконка) подхватывается автоматически
+    sources: [App, Shared]
     dependencies:
       - target: EclipseTunnel
     info:
@@ -20,6 +20,8 @@ targets:
       properties:
         UILaunchScreen: {}
         CFBundleDisplayName: Eclipse
+        CFBundleShortVersionString: "1.1"
+        CFBundleVersion: "2"
         NSCameraUsageDescription: Камера нужна для сканирования QR-кода подписки
     entitlements:
       path: App/App.entitlements
@@ -28,7 +30,6 @@ targets:
           - packet-tunnel-provider
     settings:
       base:
-        # Bundle ID оставлен прежним: он привязан к вашему профилю подписи
         PRODUCT_BUNDLE_IDENTIFIER: com.example.vpntest
         PRODUCT_NAME: Eclipse
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
@@ -39,16 +40,17 @@ targets:
     platform: iOS
     sources: [Tunnel, Shared]
     dependencies:
-      # gomobile-фреймворк статический, поэтому не встраиваем
       - framework: Frameworks/Xray.xcframework
         embed: false
         link: true
       - package: Tun2SocksKit
-      - sdk: libresolv.tbd   # нужен Go-рантайму
+      - sdk: libresolv.tbd
     info:
       path: Tunnel/Info.plist
       properties:
         CFBundleDisplayName: Eclipse Tunnel
+        CFBundleShortVersionString: "1.1"
+        CFBundleVersion: "2"
         NSExtension:
           NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider
@@ -59,7 +61,6 @@ targets:
           - packet-tunnel-provider
     settings:
       base:
-        # ДОЛЖЕН быть: bundle ID приложения + ".tunnel"
         PRODUCT_BUNDLE_IDENTIFIER: com.example.vpntest.tunnel
         PRODUCT_NAME: EclipseTunnel
         SWIFT_VERSION: "5.0"
