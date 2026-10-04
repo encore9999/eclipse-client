@@ -22,7 +22,7 @@ enum XrayConfigBuilder {
     static func build(for server: Server, options: TunnelOptions = TunnelOptions(),
                       logPath: String?, socksPort: Int = 10808) throws -> XrayProfile {
         let user = token(8), pass = token(16)
-        var outbound = try makeOutbound(link: server.link)
+        var outbound = try makeOutbound(server: server)
         outbound["tag"] = "proxy"
 
         // Mux: только для vless/vmess/trojan и не вместе с xtls-flow
@@ -31,7 +31,7 @@ enum XrayConfigBuilder {
 
         var extra: [[String: Any]] = [["tag": "direct", "protocol": "freedom"]]
         if options.fragment {
-            // Фрагментация TLS ClientHello: соединение с сервером идёт через отдельный freedom-outbound
+            // Фрагментация TLS ClientHello
             var ss = (outbound["streamSettings"] as? [String: Any]) ?? [:]
             ss["sockopt"] = ["dialerProxy": "fragment"]
             outbound["streamSettings"] = ss
@@ -59,7 +59,6 @@ enum XrayConfigBuilder {
                              "udp": true, "ip": "127.0.0.1"],
                 "sniffing": sniffing
             ]],
-            // первый outbound — дефолтный
             "outbounds": [outbound] + extra
         ]
         if let r = routing(options.directRules) { cfg["routing"] = r }
@@ -79,7 +78,6 @@ enum XrayConfigBuilder {
             let low = r.lowercased()
             if r.isEmpty || r.hasPrefix("#") { continue }
 
-            // Гео-правила раскрываем через скачанные базы
             if low.hasPrefix("geoip:") || low.hasPrefix("geosite:") {
                 let (gDomains, gIps) = expandGeo(r)
                 domains.append(contentsOf: gDomains)
@@ -98,8 +96,6 @@ enum XrayConfigBuilder {
         return rules.isEmpty ? nil : ["domainStrategy": "AsIs", "rules": rules]
     }
 
-    // "geoip:ru" -> ["5.8.0.0/16", ...], "geosite:category-ads-all" -> ["domain:example.com", ...]
-    // Лимиты защищают от раздувания JSON (десятки тысяч правил ломают старт туннеля).
     private static func expandGeo(_ rule: String) -> (domains: [String], ips: [String]) {
         let low = rule.lowercased()
         if low.hasPrefix("geoip:") {
@@ -127,7 +123,18 @@ enum XrayConfigBuilder {
 
     // MARK: outbound
 
-    private static func makeOutbound(link: String) throws -> [String: Any] {
+    private static func makeOutbound(server: Server) throws -> [String: Any] {
+        switch server.proto {
+        case "vless", "trojan", "vmess", "ss":
+            return try makeStandardOutbound(link: server.link)
+        case "hysteria2":
+            return try makeHysteria2Outbound(server: server)
+        default:
+            throw XrayConfigError.unsupported(server.proto)
+        }
+    }
+
+    private static func makeStandardOutbound(link: String) throws -> [String: Any] {
         let scheme = link.components(separatedBy: "://").first?.lowercased() ?? ""
         switch scheme {
         case "vless":  return try vless(link)
@@ -137,6 +144,58 @@ enum XrayConfigBuilder {
         default: throw XrayConfigError.unsupported(scheme)
         }
     }
+
+    // Hysteria 2 outbound
+    // Документация Xray: https://xtls.github.io/config/outbounds/hysteria.html
+    private static func makeHysteria2Outbound(server: Server) throws -> [String: Any] {
+        // settings: version, address, port
+        let settings: [String: Any] = [
+            "version": 2,
+            "address": server.host,
+            "port": server.port
+        ]
+
+        // streamSettings: method = hysteria, hysteriaSettings
+        var hysteriaSettings: [String: Any] = [
+            "version": 2
+        ]
+        if let auth = server.hy2Auth, !auth.isEmpty {
+            hysteriaSettings["auth"] = auth
+        }
+        if let obfs = server.hy2Obfs, !obfs.isEmpty {
+            var mask: [String: Any] = ["type": obfs]
+            if let obfsPass = server.hy2ObfsPassword, !obfsPass.isEmpty {
+                mask["password"] = obfsPass
+            }
+            hysteriaSettings["udpMasks"] = [mask]
+        }
+
+        // TLS настройки (SNI, insecure)
+        var tlsSettings: [String: Any] = [:]
+        if let sni = server.hy2SNI, !sni.isEmpty {
+            tlsSettings["serverName"] = sni
+        }
+        if server.hy2Insecure {
+            tlsSettings["allowInsecure"] = true
+        }
+
+        var streamSettings: [String: Any] = [
+            "method": "hysteria",
+            "hysteriaSettings": hysteriaSettings
+        ]
+        if !tlsSettings.isEmpty {
+            streamSettings["security"] = "tls"
+            streamSettings["tlsSettings"] = tlsSettings
+        }
+
+        return [
+            "protocol": "hysteria",
+            "settings": settings,
+            "streamSettings": streamSettings
+        ]
+    }
+
+    // MARK: Standard outbounds (vless, trojan, vmess, ss)
 
     private struct Parts { var host: String; var port: Int; var userInfo: String; var query: [String: String] }
 
@@ -233,7 +292,7 @@ enum XrayConfigBuilder {
         ]
     }
 
-    // MARK: streamSettings
+    // MARK: streamSettings (для TCP/WS/gRPC и т.д.)
 
     private static func stream(network: String, security: String,
                                q: [String: String], fallbackHost: String) throws -> [String: Any] {
