@@ -25,13 +25,11 @@ enum XrayConfigBuilder {
         var outbound = try makeOutbound(server: server)
         outbound["tag"] = "proxy"
 
-        // Mux: только для vless/vmess/trojan и не вместе с xtls-flow
         let muxOK = ["vless", "vmess", "trojan"].contains(server.proto) && !server.link.contains("flow=")
         if options.mux && muxOK { outbound["mux"] = ["enabled": true, "concurrency": 8] }
 
         var extra: [[String: Any]] = [["tag": "direct", "protocol": "freedom"]]
         if options.fragment {
-            // Фрагментация TLS ClientHello
             var ss = (outbound["streamSettings"] as? [String: Any]) ?? [:]
             ss["sockopt"] = ["dialerProxy": "fragment"]
             outbound["streamSettings"] = ss
@@ -68,28 +66,23 @@ enum XrayConfigBuilder {
                            socksPort: socksPort, socksUser: user, socksPass: pass)
     }
 
-    // Прямые правила: домены (суффиксом), IP/CIDR, а также geoip:/geosite: (раскрываются через GeoDat).
     private static func routing(_ raw: [String]) -> [String: Any]? {
         var domains: [String] = [], ips: [String] = []
         let known = ["domain:", "full:", "keyword:", "regexp:"]
-
         for line in raw {
             let r = line.trimmingCharacters(in: .whitespaces)
             let low = r.lowercased()
             if r.isEmpty || r.hasPrefix("#") { continue }
-
             if low.hasPrefix("geoip:") || low.hasPrefix("geosite:") {
                 let (gDomains, gIps) = expandGeo(r)
                 domains.append(contentsOf: gDomains)
                 ips.append(contentsOf: gIps)
                 continue
             }
-
             if known.contains(where: { low.hasPrefix($0) }) { domains.append(r) }
             else if isIP(r) { ips.append(r) }
             else { domains.append("domain:" + low) }
         }
-
         var rules: [[String: Any]] = []
         if !domains.isEmpty { rules.append(["type": "field", "domain": domains, "outboundTag": "direct"]) }
         if !ips.isEmpty { rules.append(["type": "field", "ip": ips, "outboundTag": "direct"]) }
@@ -100,13 +93,11 @@ enum XrayConfigBuilder {
         let low = rule.lowercased()
         if low.hasPrefix("geoip:") {
             let code = String(rule.dropFirst("geoip:".count))
-            let cidrs = GeoDat.cidrs(code: code, limit: 4000) ?? []
-            return ([], cidrs)
+            return ([], GeoDat.cidrs(code: code, limit: 4000) ?? [])
         }
         if low.hasPrefix("geosite:") {
             let code = String(rule.dropFirst("geosite:".count))
-            let doms = GeoDat.domains(code: code, limit: 2000) ?? []
-            return (doms, [])
+            return (GeoDat.domains(code: code, limit: 2000) ?? [], [])
         }
         return ([], [])
     }
@@ -121,14 +112,12 @@ enum XrayConfigBuilder {
         String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(n))
     }
 
-    // MARK: outbound
-
     private static func makeOutbound(server: Server) throws -> [String: Any] {
         switch server.proto {
         case "vless", "trojan", "vmess", "ss":
             return try makeStandardOutbound(link: server.link)
         case "hysteria2":
-            return try makeHysteria2Outbound(server: server)
+            return makeHysteria2Outbound(server: server)
         default:
             throw XrayConfigError.unsupported(server.proto)
         }
@@ -145,57 +134,23 @@ enum XrayConfigBuilder {
         }
     }
 
-    // Hysteria 2 outbound
-    // Документация Xray: https://xtls.github.io/config/outbounds/hysteria.html
-    private static func makeHysteria2Outbound(server: Server) throws -> [String: Any] {
-        // settings: version, address, port
-        let settings: [String: Any] = [
+    // Hysteria 2 — плоский outbound без кастомных streamSettings
+    private static func makeHysteria2Outbound(server: Server) -> [String: Any] {
+        var settings: [String: Any] = [
             "version": 2,
             "address": server.host,
             "port": server.port
         ]
-
-        // streamSettings: method = hysteria, hysteriaSettings
-        var hysteriaSettings: [String: Any] = [
-            "version": 2
-        ]
-        if let auth = server.hy2Auth, !auth.isEmpty {
-            hysteriaSettings["auth"] = auth
-        }
+        if let auth = server.hy2Auth, !auth.isEmpty { settings["auth"] = auth }
+        if let sni = server.hy2SNI, !sni.isEmpty { settings["sni"] = sni }
+        if server.hy2Insecure { settings["insecure"] = true }
         if let obfs = server.hy2Obfs, !obfs.isEmpty {
             var mask: [String: Any] = ["type": obfs]
-            if let obfsPass = server.hy2ObfsPassword, !obfsPass.isEmpty {
-                mask["password"] = obfsPass
-            }
-            hysteriaSettings["udpMasks"] = [mask]
+            if let pw = server.hy2ObfsPassword, !pw.isEmpty { mask["password"] = pw }
+            settings["obfs"] = mask
         }
-
-        // TLS настройки (SNI, insecure)
-        var tlsSettings: [String: Any] = [:]
-        if let sni = server.hy2SNI, !sni.isEmpty {
-            tlsSettings["serverName"] = sni
-        }
-        if server.hy2Insecure {
-            tlsSettings["allowInsecure"] = true
-        }
-
-        var streamSettings: [String: Any] = [
-            "method": "hysteria",
-            "hysteriaSettings": hysteriaSettings
-        ]
-        if !tlsSettings.isEmpty {
-            streamSettings["security"] = "tls"
-            streamSettings["tlsSettings"] = tlsSettings
-        }
-
-        return [
-            "protocol": "hysteria",
-            "settings": settings,
-            "streamSettings": streamSettings
-        ]
+        return ["protocol": "hysteria", "settings": settings]
     }
-
-    // MARK: Standard outbounds (vless, trojan, vmess, ss)
 
     private struct Parts { var host: String; var port: Int; var userInfo: String; var query: [String: String] }
 
@@ -271,7 +226,6 @@ enum XrayConfigBuilder {
         var body = String(b0.dropFirst("ss://".count))
         if let q = body.firstIndex(of: "?") { body = String(body[..<q]) }
         if let s = body.firstIndex(of: "/") { body = String(body[..<s]) }
-
         var cred: String, hostPort: String
         if let at = body.lastIndex(of: "@") {
             let ui = String(body[..<at])
@@ -281,7 +235,6 @@ enum XrayConfigBuilder {
             cred = String(dec[..<at])
             hostPort = String(dec[dec.index(after: at)...])
         } else { throw XrayConfigError.invalidLink }
-
         guard let c = cred.firstIndex(of: ":"),
               let (host, port) = LinkParser.splitHostPort(hostPort) else { throw XrayConfigError.invalidLink }
         return [
@@ -292,15 +245,12 @@ enum XrayConfigBuilder {
         ]
     }
 
-    // MARK: streamSettings (для TCP/WS/gRPC и т.д.)
-
     private static func stream(network: String, security: String,
                                q: [String: String], fallbackHost: String) throws -> [String: Any] {
         var s: [String: Any] = [:]
         let host = q["host"] ?? ""
         switch network.lowercased() {
-        case "tcp", "":
-            s["network"] = "tcp"
+        case "tcp", "": s["network"] = "tcp"
         case "ws":
             s["network"] = "ws"
             var ws: [String: Any] = ["path": q["path"] ?? "/"]
@@ -322,8 +272,7 @@ enum XrayConfigBuilder {
         case "h2", "http":
             s["network"] = "h2"
             s["httpSettings"] = ["path": q["path"] ?? "/", "host": host.isEmpty ? [] : [host]]
-        case let other:
-            throw XrayConfigError.unsupported("transport \(other)")
+        case let other: throw XrayConfigError.unsupported("transport \(other)")
         }
 
         let sni = (q["sni"]?.isEmpty == false ? q["sni"] : nil) ?? q["peer"] ?? (host.isEmpty ? fallbackHost : host)
@@ -341,8 +290,7 @@ enum XrayConfigBuilder {
             s["realitySettings"] = ["serverName": sni,
                                     "fingerprint": (q["fp"]?.isEmpty == false ? q["fp"]! : "chrome"),
                                     "publicKey": pbk, "shortId": q["sid"] ?? "", "spiderX": q["spx"] ?? ""]
-        default:
-            s["security"] = "none"
+        default: s["security"] = "none"
         }
         return s
     }
