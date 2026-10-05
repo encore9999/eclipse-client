@@ -42,6 +42,7 @@ func StartSingbox(config string, workDir string) (err error) {
 		include.EndpointRegistry(),
 		include.DNSTransportRegistry(),
 		include.ServiceRegistry(),
+		include.CertificateProviderRegistry(),
 	))
 
 	var opts option.Options
