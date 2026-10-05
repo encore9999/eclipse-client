@@ -1,13 +1,8 @@
 import Foundation
 import Network
 
-// Этот файл компилируется и в приложение, и в расширение.
-// Не импортируйте сюда SwiftUI/UIKit.
-
-// MARK: - App Group / ключи
-
 enum AppGroup {
-    static let id = "group.com.example.vpntest"   // должен совпадать с project.yml
+    static let id = "group.com.example.vpntest"
     static var defaults: UserDefaults { UserDefaults(suiteName: id) ?? .standard }
     static var container: URL {
         FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: id)
@@ -30,7 +25,6 @@ enum TunnelKeys {
     static let options = "options"
 }
 
-// Опции туннеля: приложение -> расширение (JSON-строкой в providerConfiguration)
 struct TunnelOptions: Codable, Equatable {
     var dns: [String] = ["1.1.1.1", "1.0.0.1"]
     var mtu: Int = 1400
@@ -38,8 +32,8 @@ struct TunnelOptions: Codable, Equatable {
     var fragment = false
     var sniffing = true
     var bypassLAN = true
-    var directRules: [String] = []   // домены, IP или CIDR — идут мимо прокси
-    var memoryLimit: Int = 50        // лимит памяти ядра Xray в МБ
+    var directRules: [String] = []
+    var memoryLimit: Int = 50
 
     var json: String {
         guard let d = try? JSONEncoder().encode(self) else { return "{}" }
@@ -53,13 +47,33 @@ struct TunnelOptions: Codable, Equatable {
     }
 }
 
+enum Sanitizer {
+    static func clean(_ s: String) -> String {
+        var out = s
+        out = out.replacingOccurrences(
+            of: "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+            with: "***",
+            options: .regularExpression)
+        out = out.replacingOccurrences(
+            of: "(password|passwd|pass|auth|token|secret|key|uuid|id)=[^&\\s\"']+",
+            with: "$1=***",
+            options: [.regularExpression, .caseInsensitive])
+        out = out.replacingOccurrences(
+            of: "(vless|vmess|trojan|ss|hysteria2|hy2)://[^\\s\"']+",
+            with: "$1://***",
+            options: [.regularExpression, .caseInsensitive])
+        return out
+    }
+}
+
 enum SharedLog {
     private static let q = DispatchQueue(label: "eclipse.sharedlog")
     private static var url: URL { AppGroup.container.appendingPathComponent("tunnel.log") }
 
     static func write(_ s: String) {
+        let safe = Sanitizer.clean(s)
         q.async {
-            let line = "\(ISO8601DateFormatter().string(from: Date())) \(s)\n"
+            let line = "\(ISO8601DateFormatter().string(from: Date())) \(safe)\n"
             guard let data = line.data(using: .utf8) else { return }
             if let h = try? FileHandle(forWritingTo: url) {
                 h.seekToEndOfFile()
@@ -75,8 +89,6 @@ enum SharedLog {
     static func read() -> String { (try? String(contentsOf: url)) ?? "" }
 }
 
-// MARK: - Models
-
 struct Server: Identifiable, Codable, Equatable {
     var id = UUID()
     var name: String
@@ -87,14 +99,12 @@ struct Server: Identifiable, Codable, Equatable {
     var transport: String?
     var security: String?
 
-    // Поля для Hysteria 2
     var hy2Auth: String?
     var hy2Obfs: String?
     var hy2ObfsPassword: String?
     var hy2SNI: String?
     var hy2Insecure: Bool = false
 
-    // "VLESS + REALITY", "TROJAN + TLS", "VMESS", "HYSTERIA2"
     var protocolLabel: String {
         if proto == "hysteria2" { return "HYSTERIA 2" }
         let base = proto == "ss" ? "SHADOWSOCKS" : proto.uppercased()
@@ -136,12 +146,8 @@ enum LinkParser {
 
     static func parseSubscription(_ text: String) -> [Server] {
         var body = text
-        if !body.contains("://") {
-            body = decodeBase64(text) ?? ""
-        }
-        return body
-            .components(separatedBy: CharacterSet.newlines)
-            .compactMap { parse($0) }
+        if !body.contains("://") { body = decodeBase64(text) ?? "" }
+        return body.components(separatedBy: CharacterSet.newlines).compactMap { parse($0) }
     }
 
     static func splitHostPort(_ hp: String) -> (String, Int)? {
@@ -225,74 +231,47 @@ enum LinkParser {
                       transport: "tcp", security: nil)
     }
 
-    // Парсер Hysteria 2 (hysteria2://, hy2://)
-    // Структура: hysteria2://[auth@]hostname[:port]/?[key=value]&[key=value]...[#name]
     private static func parseHysteria2(_ s: String, proto: String) -> Server? {
         let (body, name) = splitFragment(s)
         guard let sch = body.range(of: "://") else { return nil }
         var rest = String(body[sch.upperBound...])
-
-        // Query parameters
         var query: [String: String] = [:]
         if let q = rest.firstIndex(of: "?") {
             query = parseQuery(String(rest[rest.index(after: q)...]))
             rest = String(rest[..<q])
         }
-
-        // Убираем завершающий слэш
         if rest.hasSuffix("/") { rest = String(rest.dropLast()) }
-
-        // Auth (userinfo) и host:port
         var auth: String?
         var hostPortPart: String
-
         if let at = rest.lastIndex(of: "@") {
             auth = String(rest[..<at])
             hostPortPart = String(rest[rest.index(after: at)...])
         } else {
-            // Если нет @, значит нет и auth
             hostPortPart = rest
         }
-
         guard let (host, port) = splitHostPort(hostPortPart) else { return nil }
-
-        let obfs = query["obfs"]
-        let obfsPassword = query["obfs-password"]
-        let sni = query["sni"]
-        let insecure = query["insecure"] == "1" || query["insecure"]?.lowercased() == "true"
-
         return Server(
             name: name.isEmpty ? host : name,
-            proto: proto,
-            host: host,
-            port: port,
-            link: s,
-            transport: "hysteria2",
-            security: "tls",
+            proto: proto, host: host, port: port, link: s,
+            transport: "hysteria2", security: "tls",
             hy2Auth: auth,
-            hy2Obfs: obfs,
-            hy2ObfsPassword: obfsPassword,
-            hy2SNI: sni,
-            hy2Insecure: insecure
+            hy2Obfs: query["obfs"],
+            hy2ObfsPassword: query["obfs-password"],
+            hy2SNI: query["sni"],
+            hy2Insecure: query["insecure"] == "1" || query["insecure"]?.lowercased() == "true"
         )
     }
 }
-
-// MARK: - TCP-пинг
 
 enum Pinger {
     private final class Once {
         private let lock = NSLock()
         private var fired = false
         func run(_ f: () -> Void) {
-            lock.lock()
-            let already = fired
-            fired = true
-            lock.unlock()
+            lock.lock(); let already = fired; fired = true; lock.unlock()
             if !already { f() }
         }
     }
-
     static func ping(host: String, port: Int, timeout: TimeInterval = 3) async -> Int? {
         guard port > 0, port <= 65535,
               let p = Network.NWEndpoint.Port(rawValue: UInt16(port)) else { return nil }
@@ -300,21 +279,15 @@ enum Pinger {
             let conn = NWConnection(host: Network.NWEndpoint.Host(host), port: p, using: .tcp)
             let once = Once()
             let start = DispatchTime.now().uptimeNanoseconds
-            func finish(_ v: Int?) {
-                once.run {
-                    conn.cancel()
-                    cont.resume(returning: v)
-                }
+            @Sendable func finish(_ v: Int?) {
+                once.run { conn.cancel(); cont.resume(returning: v) }
             }
             conn.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
-                    let ms = Int((DispatchTime.now().uptimeNanoseconds - start) / 1_000_000)
-                    finish(ms)
-                case .failed:
-                    finish(nil)
-                default:
-                    break
+                    finish(Int((DispatchTime.now().uptimeNanoseconds - start) / 1_000_000))
+                case .failed: finish(nil)
+                default: break
                 }
             }
             conn.start(queue: .global())
