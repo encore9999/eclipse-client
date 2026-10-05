@@ -6,7 +6,7 @@ options:
 packages:
   Tun2SocksKit:
     url: https://github.com/EbrahimTahernejad/Tun2SocksKit
-    branch: main   # после первой успешной сборки зафиксируйте тег/ревизию
+    branch: main
 
 targets:
   Eclipse:
@@ -20,8 +20,8 @@ targets:
       properties:
         UILaunchScreen: {}
         CFBundleDisplayName: Eclipse
-        CFBundleShortVersionString: "1.1"
-        CFBundleVersion: "2"
+        CFBundleShortVersionString: "1.3"
+        CFBundleVersion: "4"
         NSCameraUsageDescription: Камера нужна для сканирования QR-кода подписки
     entitlements:
       path: App/App.entitlements
@@ -49,10 +49,10 @@ targets:
       path: Tunnel/Info.plist
       properties:
         CFBundleDisplayName: Eclipse Tunnel
-        CFBundleShortVersionString: "1.1"
-        CFBundleVersion: "2"
+        CFBundleShortVersionString: "1.3"
+        CFBundleVersion: "4"
         NSExtension:
-          NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
+          NSExtensionPointIdentifier: com.apple.networking.networkextension.packet-tunnel
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider
     entitlements:
       path: Tunnel/Tunnel.entitlements
