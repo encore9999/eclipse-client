@@ -38,8 +38,8 @@ func Start(config string, assetDir string) (err error) {
 			err = fmt.Errorf("xray panic: %v", r)
 		}
 	}()
-	if instance != nil {
-		return errors.New("xray already running")
+	if instance != nil || sbInstance != nil {
+		return errors.New("core already running")
 	}
 
 	// Лимит памяти для extension: берём из SetMemoryLimit (или 50 МБ по умолчанию).
@@ -64,13 +64,14 @@ func Stop() {
 		_ = instance.Close()
 		instance = nil
 	}
+	stopSingbox()
 	debug.FreeOSMemory()
 }
 
 func IsRunning() bool {
 	mu.Lock()
 	defer mu.Unlock()
-	return instance != nil
+	return instance != nil || sbInstance != nil
 }
 
 func Version() string { return core.Version() }

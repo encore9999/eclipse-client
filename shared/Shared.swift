@@ -23,6 +23,8 @@ enum TunnelKeys {
     static let serverPort = "serverPort"
     static let lastError = "tunnel.lastError"
     static let options = "options"
+    static let core = "core"          // "xray" | "singbox"
+    static let udpServer = "udpServer" // true для QUIC-протоколов (hysteria2, tuic)
 }
 
 struct TunnelOptions: Codable, Equatable {
@@ -59,7 +61,7 @@ enum Sanitizer {
             with: "$1=***",
             options: [.regularExpression, .caseInsensitive])
         out = out.replacingOccurrences(
-            of: "(vless|vmess|trojan|ss|hysteria2|hy2)://[^\\s\"']+",
+            of: "(vless|vmess|trojan|ss|hysteria2|hy2|tuic)://[^\\s\"']+",
             with: "$1://***",
             options: [.regularExpression, .caseInsensitive])
         return out
@@ -105,8 +107,23 @@ struct Server: Identifiable, Codable, Equatable {
     var hy2SNI: String?
     var hy2Insecure: Bool = false
 
+    // TUIC v5 (все поля опциональны, чтобы не ломать декодирование уже сохранённых серверов)
+    var tuicUUID: String?
+    var tuicPassword: String?
+    var tuicCongestion: String?
+    var tuicUDPMode: String?
+    var tuicSNI: String?
+    var tuicALPN: String?
+    var tuicInsecure: Bool?
+
+    /// QUIC-протоколы слушают UDP — TCP-проверка порта для них бессмысленна.
+    var isUDPBased: Bool { proto == "hysteria2" || proto == "tuic" }
+    /// Ядро, которое умеет этот протокол.
+    var core: String { proto == "tuic" ? "singbox" : "xray" }
+
     var protocolLabel: String {
         if proto == "hysteria2" { return "HYSTERIA 2" }
+        if proto == "tuic" { return "TUIC" }
         let base = proto == "ss" ? "SHADOWSOCKS" : proto.uppercased()
         if let s = security, !s.isEmpty, s != "none" { return "\(base) + \(s.uppercased())" }
         return base
@@ -140,6 +157,7 @@ enum LinkParser {
         case "vmess": return parseVMess(s)
         case "ss": return parseSS(s)
         case "hysteria2", "hy2": return parseHysteria2(s, proto: "hysteria2")
+        case "tuic": return parseTUIC(s)
         default: return nil
         }
     }
@@ -231,6 +249,48 @@ enum LinkParser {
                       transport: "tcp", security: nil)
     }
 
+
+    /// tuic://UUID:PASSWORD@host:port?congestion_control=bbr&udp_relay_mode=native&alpn=h3&sni=example.com&allow_insecure=1#name
+    private static func parseTUIC(_ s: String) -> Server? {
+        let (body, name) = splitFragment(s)
+        guard let sch = body.range(of: "://") else { return nil }
+        var rest = String(body[sch.upperBound...])
+        var query: [String: String] = [:]
+        if let q = rest.firstIndex(of: "?") {
+            query = parseQuery(String(rest[rest.index(after: q)...]))
+            rest = String(rest[..<q])
+        }
+        if rest.hasSuffix("/") { rest = String(rest.dropLast()) }
+        guard let at = rest.lastIndex(of: "@") else { return nil }
+        let userInfo = String(rest[..<at])
+        guard let (host, port) = splitHostPort(String(rest[rest.index(after: at)...])) else { return nil }
+        // UUID не содержит ':', пароль может — делим по первому двоеточию
+        let uuid: String, password: String
+        if let c = userInfo.firstIndex(of: ":") {
+            uuid = String(userInfo[..<c]).removingPercentEncoding ?? String(userInfo[..<c])
+            let pw = String(userInfo[userInfo.index(after: c)...])
+            password = pw.removingPercentEncoding ?? pw
+        } else {
+            uuid = userInfo.removingPercentEncoding ?? userInfo
+            password = query["password"] ?? ""
+        }
+        guard !uuid.isEmpty else { return nil }
+        func flag(_ k: String) -> Bool {
+            guard let v = query[k]?.lowercased() else { return false }
+            return v == "1" || v == "true"
+        }
+        var srv = Server(name: name.isEmpty ? host : name, proto: "tuic", host: host, port: port, link: s,
+                         transport: "quic", security: "tls")
+        srv.tuicUUID = uuid
+        srv.tuicPassword = password
+        srv.tuicCongestion = query["congestion_control"] ?? query["congestion-control"] ?? query["cc"]
+        srv.tuicUDPMode = query["udp_relay_mode"] ?? query["udp-relay-mode"]
+        srv.tuicSNI = query["sni"] ?? query["peer"]
+        srv.tuicALPN = query["alpn"]
+        srv.tuicInsecure = flag("allow_insecure") || flag("allowInsecure") || flag("insecure") || flag("skip-cert-verify")
+        return srv
+    }
+
     private static func parseHysteria2(_ s: String, proto: String) -> Server? {
         let (body, name) = splitFragment(s)
         guard let sch = body.range(of: "://") else { return nil }
@@ -263,35 +323,3 @@ enum LinkParser {
     }
 }
 
-enum Pinger {
-    private final class Once {
-        private let lock = NSLock()
-        private var fired = false
-        func run(_ f: () -> Void) {
-            lock.lock(); let already = fired; fired = true; lock.unlock()
-            if !already { f() }
-        }
-    }
-    static func ping(host: String, port: Int, timeout: TimeInterval = 3) async -> Int? {
-        guard port > 0, port <= 65535,
-              let p = Network.NWEndpoint.Port(rawValue: UInt16(port)) else { return nil }
-        return await withCheckedContinuation { (cont: CheckedContinuation<Int?, Never>) in
-            let conn = NWConnection(host: Network.NWEndpoint.Host(host), port: p, using: .tcp)
-            let once = Once()
-            let start = DispatchTime.now().uptimeNanoseconds
-            @Sendable func finish(_ v: Int?) {
-                once.run { conn.cancel(); cont.resume(returning: v) }
-            }
-            conn.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    finish(Int((DispatchTime.now().uptimeNanoseconds - start) / 1_000_000))
-                case .failed: finish(nil)
-                default: break
-                }
-            }
-            conn.start(queue: .global())
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { finish(nil) }
-        }
-    }
-}

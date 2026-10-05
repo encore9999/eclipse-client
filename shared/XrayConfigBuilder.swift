@@ -5,6 +5,8 @@ struct XrayProfile {
     let socksPort: Int
     let socksUser: String
     let socksPass: String
+    /// Какое ядро поднимать в туннеле: "xray" или "singbox" (TUIC).
+    var core: String = "xray"
 }
 
 enum XrayConfigError: LocalizedError {
@@ -21,6 +23,10 @@ enum XrayConfigError: LocalizedError {
 enum XrayConfigBuilder {
     static func build(for server: Server, options: TunnelOptions = TunnelOptions(),
                       logPath: String?, socksPort: Int = 10808) throws -> XrayProfile {
+        // TUIC в Xray-core не поддерживается - его обслуживает sing-box.
+        if server.proto == "tuic" {
+            return try SingboxConfigBuilder.build(for: server, options: options, socksPort: socksPort)
+        }
         let user = token(8), pass = token(16)
         var outbound = try makeOutbound(server: server)
         outbound["tag"] = "proxy"
@@ -89,7 +95,7 @@ enum XrayConfigBuilder {
         return rules.isEmpty ? nil : ["domainStrategy": "AsIs", "rules": rules]
     }
 
-    private static func expandGeo(_ rule: String) -> (domains: [String], ips: [String]) {
+    static func expandGeo(_ rule: String) -> (domains: [String], ips: [String]) {
         let low = rule.lowercased()
         if low.hasPrefix("geoip:") {
             let code = String(rule.dropFirst("geoip:".count))
@@ -102,13 +108,13 @@ enum XrayConfigBuilder {
         return ([], [])
     }
 
-    private static func isIP(_ s: String) -> Bool {
+    static func isIP(_ s: String) -> Bool {
         let base = s.split(separator: "/", maxSplits: 1).first.map(String.init) ?? s
         var v4 = in_addr(), v6 = in6_addr()
         return inet_pton(AF_INET, base, &v4) == 1 || inet_pton(AF_INET6, base, &v6) == 1
     }
 
-    private static func token(_ n: Int) -> String {
+    static func token(_ n: Int) -> String {
         String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(n))
     }
 

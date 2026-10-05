@@ -14,7 +14,8 @@ struct EclipseApp: App {
     init() {
         let appearance = UITabBarAppearance()
         appearance.configureWithOpaqueBackground()
-        appearance.backgroundColor = UIColor(red: 13/255, green: 11/255, blue: 26/255, alpha: 1)
+        appearance.backgroundColor = UIColor { $0.userInterfaceStyle == .light
+            ? UIColor(hex: 0xF5F2FF) : UIColor(hex: 0x0D0B1A) }
         UITabBar.appearance().standardAppearance = appearance
         UITabBar.appearance().scrollEdgeAppearance = appearance
         UITextView.appearance().backgroundColor = .clear
@@ -26,8 +27,15 @@ struct EclipseApp: App {
                 .environmentObject(store)
                 .environmentObject(vpn)
                 .environmentObject(AppSettings.shared)
-                .preferredColorScheme(.dark)
+                .preferredColorScheme(AppSettings.shared.appearance.scheme)
         }
+    }
+}
+
+struct AppearanceModifier: ViewModifier {
+    @ObservedObject private var settings = AppSettings.shared
+    func body(content: Content) -> some View {
+        content.preferredColorScheme(settings.appearance.scheme)
     }
 }
 
@@ -55,6 +63,9 @@ struct RootView: View {
             vpn.load()
             Task { await store.autoRefresh() }
         }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            vpn.load()   // пересинхронизируем статус: расширение могло упасть, пока приложение спало
+        }
     }
 }
 
@@ -68,19 +79,63 @@ extension Color {
     }
 }
 
+extension UIColor {
+    convenience init(hex: UInt32, alpha: CGFloat = 1) {
+        self.init(red: CGFloat((hex >> 16) & 0xFF) / 255, green: CGFloat((hex >> 8) & 0xFF) / 255,
+                  blue: CGFloat(hex & 0xFF) / 255, alpha: alpha)
+    }
+}
+
+/// Тема приложения: системная / тёмная / светлая.
+enum AppearanceMode: String, CaseIterable, Identifiable {
+    case system, dark, light
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .system: return "Системная"
+        case .dark: return "Тёмная"
+        case .light: return "Светлая"
+        }
+    }
+    var scheme: ColorScheme? {
+        switch self {
+        case .system: return nil
+        case .dark: return .dark
+        case .light: return .light
+        }
+    }
+}
+
 enum Theme {
-    static let bg = Color(hex: 0x0D0B1A)
-    static let bg2 = Color(hex: 0x140F28)
-    static let card = Color(hex: 0x15121F)
-    static let border = Color.white.opacity(0.09)
+    /// Цвет, который сам меняется между тёмной и светлой темой.
+    static func dyn(_ dark: UIColor, _ light: UIColor) -> Color {
+        Color(UIColor { $0.userInterfaceStyle == .light ? light : dark })
+    }
+    static func dyn(_ dark: UInt32, _ light: UInt32) -> Color { dyn(UIColor(hex: dark), UIColor(hex: light)) }
+
+    static let bg = dyn(0x0D0B1A, 0xF5F2FF)
+    static let bg2 = dyn(0x140F28, 0xEBE6FA)
+    static let card = dyn(0x15121F, 0xFFFFFF)
     static let accent = Color(hex: 0x7C5CFC)
     static let accentDark = Color(hex: 0x6040E0)
-    static let accentLight = Color(hex: 0xC4ABFF)
+    static let accentLight = dyn(0xC4ABFF, 0x5B3FD6)   // акцентный текст/иконки
     static let accent2 = Color(hex: 0xA07CFF)
-    static let muted = Color(hex: 0x9B90CC)
+    static let muted = dyn(0x9B90CC, 0x6B6190)
+    /// Основной цвет текста.
+    static let text = dyn(0xFFFFFF, 0x1B1635)
+    static let border = dyn(UIColor(white: 1, alpha: 0.09), UIColor(hex: 0x1B1635, alpha: 0.12))
+    /// Полупрозрачная заливка поверх фона (замена Color.white.opacity(x)).
+    static func fg(_ a: Double) -> Color {
+        dyn(UIColor(white: 1, alpha: a), UIColor(hex: 0x1B1635, alpha: a * 1.4))
+    }
+    /// Поля ввода.
+    static let field = dyn(UIColor(white: 0, alpha: 0.28), UIColor(hex: 0x1B1635, alpha: 0.06))
+    /// Карточки поверх анимированного фона.
+    static let glass = dyn(UIColor(hex: 0x0F0C20, alpha: 0.82), UIColor(white: 1, alpha: 0.88))
 }
 
 struct AppBackground: View {
+    @Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject var vpn: VPNController
     @State private var float = false
     var body: some View {
@@ -107,9 +162,11 @@ struct AppBackground: View {
                 }
             }
             SceneCanvas(connected: vpn.status == .connected)
-            Color.black.opacity(0.22)
-            RadialGradient(colors: [Color.black.opacity(0.40), .clear],
-                           center: .center, startRadius: 0, endRadius: 340)
+            if colorScheme == .dark {
+                Color.black.opacity(0.22)
+                RadialGradient(colors: [Color.black.opacity(0.40), .clear],
+                               center: .center, startRadius: 0, endRadius: 340)
+            }
         }
         .ignoresSafeArea()
         .onAppear {
@@ -278,7 +335,7 @@ struct Logo: View {
         Text("Eclipse")
             .font(.system(size: 22, weight: .bold))
             .kerning(-0.5)
-            .foregroundColor(.white)
+            .foregroundColor(Theme.text)
             .frame(maxWidth: .infinity)
             .legible()
     }
@@ -300,14 +357,14 @@ extension View {
     func card(selected: Bool = false) -> some View {
         self
             .padding(16)
-            .background(RoundedRectangle(cornerRadius: 22).fill(Color(hex: 0x0F0C20, opacity: 0.80)))
+            .background(RoundedRectangle(cornerRadius: 22).fill(Theme.glass))
             .overlay(
                 RoundedRectangle(cornerRadius: 22)
                     .stroke(selected ? Theme.accent : Theme.border, lineWidth: selected ? 1.5 : 1)
             )
     }
     func legible() -> some View {
-        shadow(color: .black.opacity(0.65), radius: 6, x: 0, y: 1)
+        shadow(color: Theme.dyn(UIColor(white: 0, alpha: 0.65), UIColor.clear), radius: 6, x: 0, y: 1)
     }
 }
 
@@ -329,10 +386,10 @@ struct SecondaryButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 16, weight: .medium))
-            .foregroundColor(.white)
+            .foregroundColor(Theme.text)
             .padding(.vertical, 14)
             .frame(maxWidth: .infinity)
-            .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.04)))
+            .background(RoundedRectangle(cornerRadius: 12).fill(Theme.fg(0.04)))
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.border, lineWidth: 1))
             .opacity(configuration.isPressed ? 0.8 : 1)
     }
@@ -396,27 +453,6 @@ enum PingDisplay: String, Codable, CaseIterable, Identifiable {
         case .time: return "Время"
         case .dots: return "Точки"
         case .bar: return "Шкала"
-        }
-    }
-}
-
-enum PingProtocol: String, Codable, CaseIterable, Identifiable {
-    case tcp, httpGet, httpHead, icmp
-    var id: String { rawValue }
-    var title: String {
-        switch self {
-        case .tcp: return "TCP"
-        case .httpGet: return "HTTP GET"
-        case .httpHead: return "HTTP HEAD"
-        case .icmp: return "ICMP"
-        }
-    }
-    var subtitle: String {
-        switch self {
-        case .tcp: return "Рекомендуется - самый быстрый"
-        case .httpGet: return "Полный GET-запрос"
-        case .httpHead: return "HEAD-запрос, только заголовки"
-        case .icmp: return "ICMP echo (может не работать)"
         }
     }
 }
@@ -692,13 +728,12 @@ final class Store: ObservableObject {
     func pingAll(_ groupID: UUID) async {
         guard let g = groups.first(where: { $0.id == groupID }), !g.servers.isEmpty else { return }
         pingingGroups.insert(groupID)
-        // Примечание: Pinger.ping сейчас умеет только TCP и не принимает выбор протокола.
-        // Значение g.pingProtocolOverride / AppSettings.shared.pingProtocol пока не используется.
+        let mode = g.pingProtocolOverride ?? AppSettings.shared.pingProtocol
         let servers = g.servers
         await withTaskGroup(of: (UUID, Int).self) { group in
             for s in servers {
                 group.addTask {
-                    let ms = await Pinger.ping(host: s.host, port: s.port)
+                    let ms = await Store.measure(s, mode: mode)
                     return (s.id, ms ?? -1)
                 }
             }
@@ -711,8 +746,19 @@ final class Store: ObservableObject {
 
     @MainActor
     func pingSingle(_ server: Server) async {
-        let ms = await Pinger.ping(host: server.host, port: server.port)
+        let g = groups.first { $0.servers.contains(where: { $0.id == server.id }) }
+        let mode = g?.pingProtocolOverride ?? AppSettings.shared.pingProtocol
+        let ms = await Store.measure(server, mode: mode)
         self.pings[server.id] = ms ?? -1
+    }
+
+    /// Пинг с учётом выбранного протокола. Для HTTP-режимов https включается
+    /// по security сервера (tls/reality) или по стандартным TLS-портам.
+    static func measure(_ s: Server, mode: PingProtocol) async -> Int? {
+        let sec = (s.security ?? "").lowercased()
+        let tls: Bool? = (sec == "tls" || sec == "reality") ? true : nil
+        return await Pinger.ping(host: s.host, port: s.port, mode: mode,
+                                 udpBased: s.isUDPBased, useTLS: tls, timeout: 4)
     }
 }
 
@@ -896,7 +942,45 @@ final class VPNController: ObservableObject {
         NETunnelProviderManager.loadAllFromPreferences { [weak self] managers, _ in
             guard let self = self else { return }
             let m = managers?.first ?? NETunnelProviderManager()
-            let proto = NETunnelProviderProtocol()
+            // Если прошлый туннель завис в connecting/disconnecting, startVPNTunnel молча
+            // игнорируется - отсюда "больше не подключается". Сначала добиваем старый.
+            if [.connecting, .reasserting, .disconnecting, .connected].contains(m.connection.status) {
+                m.connection.stopVPNTunnel()
+                self.waitDisconnected(m.connection, deadline: Date().addingTimeInterval(4)) {
+                    self.configureAndStart(m, server: server, profile: profile)
+                }
+                return
+            }
+            self.configureAndStart(m, server: server, profile: profile)
+        }
+    }
+
+    private func waitDisconnected(_ conn: NEVPNConnection, deadline: Date, then done: @escaping () -> Void) {
+        if conn.status == .disconnected || conn.status == .invalid || Date() > deadline {
+            DispatchQueue.main.async(execute: done); return
+        }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.25) {
+            self.waitDisconnected(conn, deadline: deadline, then: done)
+        }
+    }
+
+    private var connectToken = UUID()
+
+    /// Если за 25 с туннель не поднялся - гасим его и показываем ошибку, а не крутим вечный спиннер.
+    private func armWatchdog() {
+        let token = UUID(); connectToken = token
+        DispatchQueue.main.asyncAfter(deadline: .now() + 25) { [weak self] in
+            guard let self = self, self.connectToken == token,
+                  self.status == .connecting || self.status == .reasserting else { return }
+            SharedLog.write("[app] watchdog: туннель не поднялся за 25 с")
+            self.error = "Не удалось подключиться за 25 секунд. Проверьте сервер и сеть."
+            self.userStopped = true
+            self.manager?.connection.stopVPNTunnel()
+        }
+    }
+
+    private func configureAndStart(_ m: NETunnelProviderManager, server: Server, profile: XrayProfile) {
+        let proto = NETunnelProviderProtocol()
             proto.providerBundleIdentifier = self.tunnelBundleID
             proto.serverAddress = server.host
             proto.providerConfiguration = [
@@ -906,7 +990,9 @@ final class VPNController: ObservableObject {
                 TunnelKeys.socksPass: profile.socksPass,
                 TunnelKeys.serverHost: server.host,
                 TunnelKeys.serverPort: server.port,
-                TunnelKeys.options: AppSettings.shared.tunnelOptions.json
+                TunnelKeys.options: AppSettings.shared.tunnelOptions.json,
+                TunnelKeys.core: profile.core,
+                TunnelKeys.udpServer: server.isUDPBased
             ]
             proto.includeAllNetworks = self.killSwitch
             proto.excludeLocalNetworks = true
@@ -923,13 +1009,14 @@ final class VPNController: ObservableObject {
                 }
                 m.loadFromPreferences { _ in
                     DispatchQueue.main.async { self.manager = m }
-                    do { try m.connection.startVPNTunnel() }
-                    catch {
+                    do {
+                        try m.connection.startVPNTunnel()
+                        DispatchQueue.main.async { self.armWatchdog() }
+                    } catch {
                         DispatchQueue.main.async { self.error = Sanitizer.clean(error.localizedDescription) }
                     }
                 }
             }
-        }
     }
 }
 
@@ -1007,7 +1094,7 @@ struct HomeView: View {
 
                     Text(statusText)
                         .font(.system(size: 20, weight: .semibold))
-                        .foregroundColor(.white)
+                        .foregroundColor(Theme.text)
                         .legible()
 
                     if let up = uptimeText {
@@ -1161,7 +1248,7 @@ struct SubscriptionBlock: View {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(group.name)
                             .font(.system(size: 16, weight: .semibold))
-                            .foregroundColor(.white)
+                            .foregroundColor(Theme.text)
                             .lineLimit(1)
                         Text(subtitle)
                             .font(.system(size: 12))
@@ -1237,7 +1324,7 @@ struct SubscriptionBlock: View {
                 }
             }
         }
-        .background(RoundedRectangle(cornerRadius: 20).fill(Color(hex: 0x0F0C20, opacity: 0.85)))
+        .background(RoundedRectangle(cornerRadius: 20).fill(Theme.glass))
         .overlay(RoundedRectangle(cornerRadius: 20).stroke(Theme.border, lineWidth: 1))
         .sheet(isPresented: $showSettings) {
             SubscriptionSettingsSheet(group: group)
@@ -1270,7 +1357,7 @@ struct CompactServerRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(server.name)
                     .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(selected ? .white : .white.opacity(0.92))
+                    .foregroundColor(selected ? Theme.text : Theme.text.opacity(0.92))
                     .lineLimit(1)
                 Text(server.protocolLabel)
                     .font(.system(size: 11, weight: .semibold))
@@ -1420,6 +1507,17 @@ extension LinkParser {
             d.fingerprint = server.hy2Obfs ?? ""
             d.path = server.hy2ObfsPassword ?? ""
         }
+        if server.proto == "tuic" {
+            d.uuid = server.tuicUUID ?? ""
+            d.password = server.tuicPassword ?? ""
+            d.security = "tls"
+            d.sni = server.tuicSNI ?? ""
+            d.alpn = server.tuicALPN ?? "h3"
+            d.allowInsecure = server.tuicInsecure ?? false
+            d.network = "tuic"
+            d.fingerprint = server.tuicCongestion ?? ""   // congestion control
+            d.path = server.tuicUDPMode ?? ""             // udp relay mode
+        }
         return d
     }
 
@@ -1429,6 +1527,7 @@ extension LinkParser {
         case "vmess": return rebuildVMess(d)
         case "ss": return rebuildSS(d)
         case "hysteria2": return rebuildHysteria2(d)
+        case "tuic": return rebuildTUIC(d)
         default: return original.link
         }
     }
@@ -1499,6 +1598,21 @@ extension LinkParser {
         return "ss://\(b64)@\(d.host):\(d.port)#\(fragment)"
     }
 
+    private static func rebuildTUIC(_ d: DetailedConfig) -> String {
+        func enc(_ v: String) -> String { v.addingPercentEncoding(withAllowedCharacters: .urlUserAllowed) ?? v }
+        var result = "tuic://\(enc(d.uuid)):\(enc(d.password))@\(d.host):\(d.port)"
+        var items: [String] = []
+        if !d.fingerprint.isEmpty { items.append("congestion_control=\(d.fingerprint)") }
+        if !d.path.isEmpty { items.append("udp_relay_mode=\(d.path)") }
+        if !d.alpn.isEmpty { items.append("alpn=\(d.alpn)") }
+        if !d.sni.isEmpty { items.append("sni=\(d.sni)") }
+        if d.allowInsecure { items.append("allow_insecure=1") }
+        if !items.isEmpty { result += "?" + items.joined(separator: "&") }
+        let fragment = d.name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? ""
+        if !fragment.isEmpty { result += "#\(fragment)" }
+        return result
+    }
+
     private static func rebuildHysteria2(_ d: DetailedConfig) -> String {
         var result = "hysteria2://"
         let auth = d.password.addingPercentEncoding(withAllowedCharacters: .urlUserAllowed) ?? d.password
@@ -1539,7 +1653,7 @@ struct ConfigEditorSheet: View {
                         editable("Адрес", text: $d.host)
                         editableInt("Порт", value: $d.port)
                         if !d.uuid.isEmpty || server.proto == "vless" { editable("UUID", text: $d.uuid) }
-                        if server.proto == "trojan" || server.proto == "ss" || server.proto == "hysteria2" {
+                        if server.proto == "trojan" || server.proto == "ss" || server.proto == "hysteria2" || server.proto == "tuic" {
                             editable("Пароль", text: $d.password)
                         }
                         if server.proto == "vless" { editable("Flow", text: $d.flow) }
@@ -1582,7 +1696,7 @@ struct ConfigEditorSheet: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(AppSettings.shared.appearance.scheme)
     }
 
     private func saveChanges() {
@@ -1619,9 +1733,9 @@ struct ConfigEditorSheet: View {
                 .font(.system(size: 13, weight: .medium, design: .monospaced))
                 .textInputAutocapitalization(.never)
                 .disableAutocorrection(true)
-                .foregroundColor(.white)
+                .foregroundColor(Theme.text)
                 .padding(10)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.3)))
+                .background(RoundedRectangle(cornerRadius: 8).fill(Theme.field))
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.border, lineWidth: 1))
         }
     }
@@ -1632,9 +1746,9 @@ struct ConfigEditorSheet: View {
             TextField("", value: value, formatter: NumberFormatter())
                 .keyboardType(.numberPad)
                 .font(.system(size: 13, weight: .medium, design: .monospaced))
-                .foregroundColor(.white)
+                .foregroundColor(Theme.text)
                 .padding(10)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.3)))
+                .background(RoundedRectangle(cornerRadius: 8).fill(Theme.field))
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.border, lineWidth: 1))
         }
     }
@@ -1643,13 +1757,13 @@ struct ConfigEditorSheet: View {
         HStack {
             Text(k).font(.system(size: 13)).foregroundColor(Theme.muted)
             Spacer()
-            Text(v).font(.system(size: 13, weight: .semibold)).foregroundColor(.white)
+            Text(v).font(.system(size: 13, weight: .semibold)).foregroundColor(Theme.text)
         }
     }
 
     private func toggle(_ k: String, isOn: Binding<Bool>) -> some View {
         Toggle(isOn: isOn) {
-            Text(k).font(.system(size: 15, weight: .medium)).foregroundColor(.white)
+            Text(k).font(.system(size: 15, weight: .medium)).foregroundColor(Theme.text)
         }
         .tint(Theme.accent)
     }
@@ -1703,7 +1817,7 @@ struct ConfigDetailsSheet: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(AppSettings.shared.appearance.scheme)
     }
 
     @ViewBuilder
@@ -1731,7 +1845,7 @@ struct ConfigDetailsSheet: View {
             Spacer(minLength: 12)
             Text(v.isEmpty ? "-" : v)
                 .font(.system(size: 13, weight: .semibold, design: .monospaced))
-                .foregroundColor(bad ? Color(hex: 0xFF8A8A) : .white)
+                .foregroundColor(bad ? Color(hex: 0xFF8A8A) : Theme.text)
                 .multilineTextAlignment(.trailing)
                 .textSelection(.enabled)
         }
@@ -1805,7 +1919,7 @@ struct QRCodeSheet: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(AppSettings.shared.appearance.scheme)
     }
 }
 
@@ -1833,7 +1947,7 @@ struct JSONInboundSheet: View {
             ScrollView {
                 Text(json)
                     .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(.white)
+                    .foregroundColor(Theme.text)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(16)
                     .textSelection(.enabled)
@@ -1854,7 +1968,7 @@ struct JSONInboundSheet: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(AppSettings.shared.appearance.scheme)
     }
 }
 
@@ -1876,7 +1990,7 @@ struct RenameSheet: View {
                 TextField("Имя конфига", text: $name)
                     .textInputAutocapitalization(.never)
                     .disableAutocorrection(true)
-                    .foregroundColor(.white)
+                    .foregroundColor(Theme.text)
                     .padding(14)
                     .background(RoundedRectangle(cornerRadius: 12).fill(Theme.card))
                     .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.border, lineWidth: 1))
@@ -1899,7 +2013,7 @@ struct RenameSheet: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(AppSettings.shared.appearance.scheme)
     }
 }
 
@@ -2037,7 +2151,7 @@ struct SubscriptionSettingsSheet: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(AppSettings.shared.appearance.scheme)
     }
 
     private func save() {
@@ -2084,9 +2198,9 @@ struct SubscriptionSettingsSheet: View {
             TextField("", text: text)
                 .textInputAutocapitalization(.never)
                 .disableAutocorrection(true)
-                .foregroundColor(.white)
+                .foregroundColor(Theme.text)
                 .padding(12)
-                .background(RoundedRectangle(cornerRadius: 12).fill(Color.black.opacity(0.25)))
+                .background(RoundedRectangle(cornerRadius: 12).fill(Theme.field))
                 .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.border, lineWidth: 1))
         }
     }
@@ -2194,6 +2308,7 @@ final class AppSettings: ObservableObject {
     @Published var sortByPing: Bool { didSet { save(sortByPing, "sortByPing") } }
     @Published var pingDisplay: PingDisplay { didSet { save(pingDisplay.rawValue, "pingDisplay") } }
     @Published var pingProtocol: PingProtocol { didSet { save(pingProtocol.rawValue, "pingProtocol") } }
+    @Published var appearance: AppearanceMode { didSet { save(appearance.rawValue, "appearance") } }
 
     private func save(_ v: Any, _ key: String) {
         UserDefaults.standard.set(v, forKey: Self.keyPrefix + key)
@@ -2227,6 +2342,7 @@ final class AppSettings: ObservableObject {
         sortByPing = b("sortByPing", false)
         pingDisplay = PingDisplay(rawValue: s("pingDisplay", "time")) ?? .time
         pingProtocol = PingProtocol(rawValue: s("pingProtocol", "tcp")) ?? .tcp
+        appearance = AppearanceMode(rawValue: s("appearance", "dark")) ?? .dark
     }
 
     func reset() {
@@ -2239,6 +2355,7 @@ final class AppSettings: ObservableObject {
         autoUpdate = true; updateHours = 12; requestTimeout = 20
         uaPreset = .eclipse; customUA = ""; sendHWID = false; sortByPing = false
         pingDisplay = .time; pingProtocol = .tcp
+        appearance = .dark
     }
 
     static func isIP(_ s: String) -> Bool {
@@ -2368,7 +2485,7 @@ struct ToggleRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
                     .font(.system(size: 15, weight: .medium))
-                    .foregroundColor(.white)
+                    .foregroundColor(Theme.text)
                 if let s = subtitle {
                     Text(s).font(.system(size: 12)).foregroundColor(Theme.muted)
                 }
@@ -2386,7 +2503,7 @@ struct MenuRow<T: Hashable>: View {
 
     var body: some View {
         HStack {
-            Text(title).font(.system(size: 15, weight: .medium)).foregroundColor(.white)
+            Text(title).font(.system(size: 15, weight: .medium)).foregroundColor(Theme.text)
             Spacer()
             Menu {
                 ForEach(options.indices, id: \.self) { i in
@@ -2412,9 +2529,9 @@ struct SettingsField: View {
         TextField(placeholder, text: $text)
             .textInputAutocapitalization(.never)
             .disableAutocorrection(true)
-            .foregroundColor(.white)
+            .foregroundColor(Theme.text)
             .padding(12)
-            .background(RoundedRectangle(cornerRadius: 12).fill(Color.black.opacity(0.25)))
+            .background(RoundedRectangle(cornerRadius: 12).fill(Theme.field))
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.border, lineWidth: 1))
     }
 }
@@ -2451,7 +2568,7 @@ struct SettingsCategoryRow: View {
                 .frame(width: 36, height: 36)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.system(size: 16, weight: .semibold)).foregroundColor(.white)
+                    Text(title).font(.system(size: 16, weight: .semibold)).foregroundColor(Theme.text)
                     if !subtitle.isEmpty {
                         Text(subtitle).font(.system(size: 12)).foregroundColor(Theme.muted).lineLimit(1)
                     }
@@ -2462,7 +2579,7 @@ struct SettingsCategoryRow: View {
                     .foregroundColor(Theme.muted.opacity(0.6))
             }
             .padding(14)
-            .background(RoundedRectangle(cornerRadius: 16).fill(Color(hex: 0x0F0C20, opacity: 0.80)))
+            .background(RoundedRectangle(cornerRadius: 16).fill(Theme.glass))
             .overlay(RoundedRectangle(cornerRadius: 16).stroke(Theme.border, lineWidth: 1))
         }
         .buttonStyle(.plain)
@@ -2491,7 +2608,7 @@ struct SettingsPage<Content: View>: View {
                             .foregroundColor(Theme.accentLight)
                     }
                     .frame(width: 36, height: 36)
-                    Text(title).font(.system(size: 24, weight: .bold)).foregroundColor(.white).legible()
+                    Text(title).font(.system(size: 24, weight: .bold)).foregroundColor(Theme.text).legible()
                 }
                 .padding(.bottom, 4)
                 content
@@ -2537,9 +2654,22 @@ struct SettingsView: View {
                     Text("Настройки")
                         .font(.system(size: 34, weight: .bold))
                         .kerning(-1)
-                        .foregroundColor(.white)
+                        .foregroundColor(Theme.text)
                         .legible()
                         .padding(.bottom, 8)
+
+                    SectionHeader("Оформление")
+                    SettingsCategoryRow(title: "Тема",
+                                        subtitle: settings.appearance.title,
+                                        icon: "circle.lefthalf.filled", color: Color(hex: 0xA07CFF)) {
+                        SettingsPage("Тема", icon: "circle.lefthalf.filled") {
+                            SettingsSection("Оформление", icon: "paintpalette") {
+                                MenuRow(title: "Тема приложения", selection: $settings.appearance,
+                                        options: AppearanceMode.allCases.map { ($0, $0.title) })
+                            }
+                        }
+                        .environmentObject(settings)
+                    }
 
                     SectionHeader("Соединение")
                     SettingsCategoryRow(title: "Соединение",
@@ -2601,13 +2731,13 @@ struct SettingsView: View {
                                     }
                                     TextEditor(text: $settings.directRules)
                                         .font(.system(size: 13, design: .monospaced))
-                                        .foregroundColor(.white)
+                                        .foregroundColor(Theme.text)
                                         .textInputAutocapitalization(.never)
                                         .disableAutocorrection(true)
                                         .frame(minHeight: 120)
                                 }
                                 .padding(6)
-                                .background(RoundedRectangle(cornerRadius: 12).fill(Color.black.opacity(0.25)))
+                                .background(RoundedRectangle(cornerRadius: 12).fill(Theme.field))
                                 .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.border, lineWidth: 1))
                             }
                         }
@@ -2666,7 +2796,7 @@ struct SettingsView: View {
                                             footer: "Ограничение памяти Xray. Маленькое значение - сбои, большое - расход батареи.") {
                                 VStack(alignment: .leading, spacing: 8) {
                                     HStack {
-                                        Text("Лимит").font(.system(size: 15, weight: .medium)).foregroundColor(.white)
+                                        Text("Лимит").font(.system(size: 15, weight: .medium)).foregroundColor(Theme.text)
                                         Spacer()
                                         Text("\(settings.memoryLimit) МБ")
                                             .font(.system(size: 14, weight: .semibold))
@@ -2780,10 +2910,10 @@ struct SettingsView: View {
                                     Button { log = SharedLog.read() } label: {
                                         Label("Обновить", systemImage: "arrow.clockwise")
                                             .font(.system(size: 14, weight: .medium))
-                                            .foregroundColor(.white)
+                                            .foregroundColor(Theme.text)
                                             .frame(maxWidth: .infinity)
                                             .padding(.vertical, 10)
-                                            .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.06)))
+                                            .background(RoundedRectangle(cornerRadius: 10).fill(Theme.fg(0.06)))
                                     }.buttonStyle(.plain)
 
                                     Button {
@@ -2794,10 +2924,10 @@ struct SettingsView: View {
                                         Label(copied ? "Готово" : "Копировать",
                                               systemImage: copied ? "checkmark" : "doc.on.doc")
                                             .font(.system(size: 14, weight: .medium))
-                                            .foregroundColor(.white)
+                                            .foregroundColor(Theme.text)
                                             .frame(maxWidth: .infinity)
                                             .padding(.vertical, 10)
-                                            .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.06)))
+                                            .background(RoundedRectangle(cornerRadius: 10).fill(Theme.fg(0.06)))
                                     }.buttonStyle(.plain)
 
                                     Button {
@@ -2808,16 +2938,16 @@ struct SettingsView: View {
                                             .foregroundColor(Color(hex: 0xFF8A8A))
                                             .frame(width: 44)
                                             .padding(.vertical, 10)
-                                            .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.06)))
+                                            .background(RoundedRectangle(cornerRadius: 10).fill(Theme.fg(0.06)))
                                     }.buttonStyle(.plain)
                                 }
                                 Text(log.isEmpty ? "Логи пусты" : log)
                                     .font(.system(size: 11, design: .monospaced))
-                                    .foregroundColor(log.isEmpty ? Theme.muted : .white)
+                                    .foregroundColor(log.isEmpty ? Theme.muted : Theme.text)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .textSelection(.enabled)
                                     .padding(12)
-                                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.black.opacity(0.3)))
+                                    .background(RoundedRectangle(cornerRadius: 10).fill(Theme.field))
                             }
                         }
                     }
@@ -2867,7 +2997,7 @@ struct SettingsView: View {
             Spacer(minLength: 12)
             Text(v)
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundColor(bad ? Color(hex: 0xFF8A8A) : .white)
+                .foregroundColor(bad ? Color(hex: 0xFF8A8A) : Theme.text)
                 .multilineTextAlignment(.trailing)
         }
     }
@@ -2905,7 +3035,7 @@ struct ServersView: View {
                     Text("Серверы")
                         .font(.system(size: 34, weight: .bold))
                         .kerning(-1)
-                        .foregroundColor(.white)
+                        .foregroundColor(Theme.text)
                         .legible()
                     Spacer()
                     Button { Task { await store.refreshAll() } } label: {
@@ -2928,7 +3058,7 @@ struct ServersView: View {
                 }
 
                 if store.groups.isEmpty {
-                    Text("Пока пусто. Добавьте ссылку подписки, отсканируйте QR-код или вставьте ссылку vless:// / vmess:// / trojan:// / ss:// / hysteria2://.")
+                    Text("Пока пусто. Добавьте ссылку подписки, отсканируйте QR-код или вставьте ссылку vless:// / vmess:// / trojan:// / ss:// / hysteria2:// / tuic://.")
                         .font(.system(size: 14)).foregroundColor(Theme.muted).padding(.top, 8)
                 }
 
@@ -2964,13 +3094,13 @@ struct AddSheet: View {
         ZStack {
             Theme.bg.ignoresSafeArea()
             VStack(alignment: .leading, spacing: 16) {
-                Text("Добавить").font(.system(size: 28, weight: .bold)).foregroundColor(.white)
-                Text("Ссылка подписки (https://…) или отдельная ссылка сервера (vless://, vmess://, trojan://, ss://, hysteria2://)")
+                Text("Добавить").font(.system(size: 28, weight: .bold)).foregroundColor(Theme.text)
+                Text("Ссылка подписки (https://…) или отдельная ссылка сервера (vless://, vmess://, trojan://, ss://, hysteria2://, tuic://)")
                     .font(.system(size: 14)).foregroundColor(Theme.muted)
 
                 TextField("Вставьте ссылку", text: $text)
                     .textInputAutocapitalization(.never).disableAutocorrection(true)
-                    .foregroundColor(.white).padding(14)
+                    .foregroundColor(Theme.text).padding(14)
                     .background(RoundedRectangle(cornerRadius: 12).fill(Theme.card))
                     .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.border, lineWidth: 1))
 
@@ -3001,7 +3131,7 @@ struct AddSheet: View {
             }
             .padding(24)
         }
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(AppSettings.shared.appearance.scheme)
     }
 }
 

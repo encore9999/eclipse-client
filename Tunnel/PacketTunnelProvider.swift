@@ -21,6 +21,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private struct Cfg {
         let json: String, port: Int, user: String, pass: String, host: String, serverPort: Int
         let opts: TunnelOptions
+        let core: String, udp: Bool
         init?(_ p: [String: Any]?) {
             guard let p = p,
                   let j = p[TunnelKeys.xrayConfig] as? String,
@@ -31,6 +32,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                   let sp = (p[TunnelKeys.serverPort] as? NSNumber)?.intValue else { return nil }
             json = j; self.port = port; user = u; pass = pw; host = h; serverPort = sp
             opts = TunnelOptions.from(json: p[TunnelKeys.options] as? String)
+            core = (p[TunnelKeys.core] as? String) ?? "xray"
+            udp = (p[TunnelKeys.udpServer] as? Bool) ?? false
         }
     }
 
@@ -40,6 +43,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var lastSignature: String?
     private var restartWork: DispatchWorkItem?
     private var stopping = false
+    private var restarting = false
+    private var t2sRunning = false
+    private let t2sGroup = DispatchGroup()
 
     override func startTunnel(options: [String: NSObject]?, completionHandler: @escaping (Error?) -> Void) {
         AppGroup.defaults.removeObject(forKey: TunnelKeys.lastError)
@@ -54,10 +60,19 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
         Task {
             do {
-                guard await Pinger.ping(host: c.host, port: c.serverPort, timeout: 5) != nil else {
-                    throw TunnelError.serverUnreachable(c.host)
+                // TCP-проверка нужна только для TCP-протоколов: у QUIC (Hysteria2/TUIC)
+                // TCP-порт закрыт, и раньше из-за этого они вообще не подключались.
+                // Три попытки - на мобильной сети первая часто падает при смене сети.
+                if !c.udp {
+                    var ok = false
+                    for attempt in 1...3 {
+                        if await Pinger.ping(host: c.host, port: c.serverPort, timeout: 4) != nil { ok = true; break }
+                        log("precheck \(attempt)/3 failed")
+                        try? await Task.sleep(nanoseconds: 700_000_000)
+                    }
+                    if !ok { throw TunnelError.serverUnreachable(c.host) }
                 }
-                try startXray()
+                try startCore()
                 do { try await setTunnelNetworkSettings(makeSettings(c)) }
                 catch { throw TunnelError.settings(error.localizedDescription) }
                 startTun2Socks(c)
@@ -65,6 +80,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 log("tunnel up")
                 completionHandler(nil)
             } catch {
+                stopTun2Socks()
                 XraybridgeStop()
                 fail(error, completionHandler)
             }
@@ -76,34 +92,53 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         stopping = true
         restartWork?.cancel()
         monitor?.cancel(); monitor = nil
-        Socks5Tunnel.quit()
+        // Ждём, пока tun2socks реально остановится: иначе быстрый повторный старт
+        // (смена сервера) натыкается на ещё живой экземпляр и туннель больше не поднимается.
+        stopTun2Socks()
         XraybridgeStop()
         completionHandler()
     }
 
-    private func startXray() throws {
+    private func startCore() throws {
         guard let c = cfg else { throw TunnelError.badConfig }
         let dir = AppGroup.container.appendingPathComponent("xray", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        log("xray memoryLimit=\(c.opts.memoryLimit) МБ")
+        XraybridgeSetMemoryLimit(Int32(c.opts.memoryLimit))
+        log("core=\(c.core) memoryLimit=\(c.opts.memoryLimit) МБ")
         var nsErr: NSError?
-        if !XraybridgeStart(c.json, dir.path, &nsErr) {
-            throw TunnelError.xray(nsErr?.localizedDescription ?? "unknown")
-        }
-        log("xray started")
+        let ok = c.core == "singbox"
+            ? XraybridgeStartSingbox(c.json, dir.path, &nsErr)
+            : XraybridgeStart(c.json, dir.path, &nsErr)
+        if !ok { throw TunnelError.xray(nsErr?.localizedDescription ?? "unknown") }
+        log("core started")
     }
 
-    private func restartXray() {
-        guard !stopping else { return }
-        log("network changed → restart xray")
+    private func stopTun2Socks() {
+        guard t2sRunning else { return }
+        Socks5Tunnel.quit()
+        _ = t2sGroup.wait(timeout: .now() + 2)
+        t2sRunning = false
+    }
+
+    /// Смена сети: перезапускаем ядро И tun2socks. Раньше перезапускалось только ядро,
+    /// и UDP-сессии tun2socks (DNS, QUIC) оставались мёртвыми - интернет "пропадал".
+    private func restartStack() {
+        guard !stopping, let c = cfg else { return }
+        log("network changed → restart core + tun2socks")
         reasserting = true
+        restarting = true
+        stopTun2Socks()
         XraybridgeStop()
-        do { try startXray() }
-        catch {
+        do {
+            try startCore()
+            startTun2Socks(c)
+        } catch {
+            restarting = false
             AppGroup.defaults.set(Sanitizer.clean(error.localizedDescription), forKey: TunnelKeys.lastError)
             cancelTunnelWithError(error)
             return
         }
+        restarting = false
         reasserting = false
     }
 
@@ -127,8 +162,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
           log-file: stderr
           log-level: warn
         """
+        t2sRunning = true
+        t2sGroup.enter()
         Socks5Tunnel.run(withConfig: .string(content: yaml)) { [weak self] code in
-            guard let self = self, !self.stopping else { return }
+            self?.t2sGroup.leave()
+            guard let self = self, !self.stopping, !self.restarting else { return }
             self.log("tun2socks exited: \(code)")
             let err = TunnelError.tun2socks(code)
             AppGroup.defaults.set(Sanitizer.clean(err.localizedDescription), forKey: TunnelKeys.lastError)
@@ -181,7 +219,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         log("path: \(sig)")
         restartWork?.cancel()
         if path.status != .satisfied { reasserting = true; return }
-        let w = DispatchWorkItem { [weak self] in self?.restartXray() }
+        let w = DispatchWorkItem { [weak self] in self?.restartStack() }
         restartWork = w
         queue.asyncAfter(deadline: .now() + 1, execute: w)
     }
