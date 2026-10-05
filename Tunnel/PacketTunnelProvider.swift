@@ -24,11 +24,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         init?(_ p: [String: Any]?) {
             guard let p = p,
                   let j = p[TunnelKeys.xrayConfig] as? String,
-                  let port = p[TunnelKeys.socksPort] as? Int,
+                  let port = (p[TunnelKeys.socksPort] as? NSNumber)?.intValue,
                   let u = p[TunnelKeys.socksUser] as? String,
                   let pw = p[TunnelKeys.socksPass] as? String,
                   let h = p[TunnelKeys.serverHost] as? String,
-                  let sp = p[TunnelKeys.serverPort] as? Int else { return nil }
+                  let sp = (p[TunnelKeys.serverPort] as? NSNumber)?.intValue else { return nil }
             json = j; self.port = port; user = u; pass = pw; host = h; serverPort = sp
             opts = TunnelOptions.from(json: p[TunnelKeys.options] as? String)
         }
@@ -40,8 +40,6 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var lastSignature: String?
     private var restartWork: DispatchWorkItem?
     private var stopping = false
-
-    // MARK: start
 
     override func startTunnel(options: [String: NSObject]?, completionHandler: @escaping (Error?) -> Void) {
         AppGroup.defaults.removeObject(forKey: TunnelKeys.lastError)
@@ -56,29 +54,22 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
         Task {
             do {
-                // 1. Preflight: до туннеля сокеты расширения идут напрямую
                 guard await Pinger.ping(host: c.host, port: c.serverPort, timeout: 5) != nil else {
                     throw TunnelError.serverUnreachable(c.host)
                 }
-                // 2. Ядро
                 try startXray()
-                // 3. utun, DNS, маршруты
                 do { try await setTunnelNetworkSettings(makeSettings(c)) }
                 catch { throw TunnelError.settings(error.localizedDescription) }
-                // 4. tun2socks по fd utun
                 startTun2Socks(c)
-                // 5. Мониторинг сети
                 startMonitor()
                 log("tunnel up")
-                completionHandler(nil)   // только теперь NEVPNStatus станет .connected
+                completionHandler(nil)
             } catch {
                 XraybridgeStop()
                 fail(error, completionHandler)
             }
         }
     }
-
-    // MARK: stop
 
     override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
         log("stopTunnel reason=\(reason.rawValue)")
@@ -90,18 +81,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         completionHandler()
     }
 
-    // MARK: Xray
-
     private func startXray() throws {
         guard let c = cfg else { throw TunnelError.badConfig }
         let dir = AppGroup.container.appendingPathComponent("xray", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-
-        // Лимит памяти ядра: значение из настроек (МБ).
-        // Реально применяется только если Go-мост экспортирует XraybridgeSetMemoryLimit.
-        // XraybridgeSetMemoryLimit(Int32(c.opts.memoryLimit))
         log("xray memoryLimit=\(c.opts.memoryLimit) МБ")
-
         var nsErr: NSError?
         if !XraybridgeStart(c.json, dir.path, &nsErr) {
             throw TunnelError.xray(nsErr?.localizedDescription ?? "unknown")
@@ -116,14 +100,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         XraybridgeStop()
         do { try startXray() }
         catch {
-            AppGroup.defaults.set(error.localizedDescription, forKey: TunnelKeys.lastError)
+            AppGroup.defaults.set(Sanitizer.clean(error.localizedDescription), forKey: TunnelKeys.lastError)
             cancelTunnelWithError(error)
             return
         }
         reasserting = false
     }
-
-    // MARK: tun2socks
 
     private func startTun2Socks(_ c: Cfg) {
         let yaml = """
@@ -149,12 +131,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             guard let self = self, !self.stopping else { return }
             self.log("tun2socks exited: \(code)")
             let err = TunnelError.tun2socks(code)
-            AppGroup.defaults.set(err.localizedDescription, forKey: TunnelKeys.lastError)
+            AppGroup.defaults.set(Sanitizer.clean(err.localizedDescription), forKey: TunnelKeys.lastError)
             self.cancelTunnelWithError(err)
         }
     }
-
-    // MARK: network settings
 
     private func makeSettings(_ c: Cfg) -> NEPacketTunnelNetworkSettings {
         let s = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "127.0.0.1")
@@ -170,20 +150,19 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         ]
         s.ipv4Settings = v4
 
-        // Забираем и IPv6, иначе v6-трафик утечёт мимо туннеля
         let v6 = NEIPv6Settings(addresses: ["fd6e:a81b:704f:1211::1"], networkPrefixLengths: [64])
         v6.includedRoutes = [NEIPv6Route.default()]
-        v6.excludedRoutes = !c.opts.bypassLAN ? [] : [NEIPv6Route(destinationAddress: "fc00::", networkPrefixLength: 7),
-                             NEIPv6Route(destinationAddress: "fe80::", networkPrefixLength: 10)]
+        v6.excludedRoutes = !c.opts.bypassLAN ? [] : [
+            NEIPv6Route(destinationAddress: "fc00::", networkPrefixLength: 7),
+            NEIPv6Route(destinationAddress: "fe80::", networkPrefixLength: 10)
+        ]
         s.ipv6Settings = v6
 
         let dns = NEDNSSettings(servers: c.opts.dns.isEmpty ? ["1.1.1.1", "1.0.0.1"] : c.opts.dns)
-        dns.matchDomains = [""]            // все домены резолвятся через туннельный DNS
+        dns.matchDomains = [""]
         s.dnsSettings = dns
         return s
     }
-
-    // MARK: смена сети
 
     private func startMonitor() {
         let m = NWPathMonitor()
@@ -200,19 +179,16 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         guard sig != prev else { return }
         lastSignature = sig
         log("path: \(sig)")
-
         restartWork?.cancel()
-        if path.status != .satisfied { reasserting = true; return }   // ждём сеть
+        if path.status != .satisfied { reasserting = true; return }
         let w = DispatchWorkItem { [weak self] in self?.restartXray() }
         restartWork = w
-        queue.asyncAfter(deadline: .now() + 1, execute: w)           // debounce
+        queue.asyncAfter(deadline: .now() + 1, execute: w)
     }
-
-    // MARK: helpers
 
     private func fail(_ error: Error, _ completion: @escaping (Error?) -> Void) {
         log("FAIL: \(error.localizedDescription)")
-        AppGroup.defaults.set(error.localizedDescription, forKey: TunnelKeys.lastError)
+        AppGroup.defaults.set(Sanitizer.clean(error.localizedDescription), forKey: TunnelKeys.lastError)
         completion(error)
     }
 
