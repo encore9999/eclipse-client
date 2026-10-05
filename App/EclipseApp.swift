@@ -692,12 +692,13 @@ final class Store: ObservableObject {
     func pingAll(_ groupID: UUID) async {
         guard let g = groups.first(where: { $0.id == groupID }), !g.servers.isEmpty else { return }
         pingingGroups.insert(groupID)
-        let proto = g.pingProtocolOverride ?? AppSettings.shared.pingProtocol
+        // Примечание: Pinger.ping сейчас умеет только TCP и не принимает выбор протокола.
+        // Значение g.pingProtocolOverride / AppSettings.shared.pingProtocol пока не используется.
         let servers = g.servers
         await withTaskGroup(of: (UUID, Int).self) { group in
             for s in servers {
                 group.addTask {
-                    let ms = await Pinger.ping(host: s.host, port: s.port, protocol: proto)
+                    let ms = await Pinger.ping(host: s.host, port: s.port)
                     return (s.id, ms ?? -1)
                 }
             }
@@ -710,14 +711,12 @@ final class Store: ObservableObject {
 
     @MainActor
     func pingSingle(_ server: Server) async {
-        let group = groups.first { $0.servers.contains(where: { $0.id == server.id }) }
-        let proto = group?.pingProtocolOverride ?? AppSettings.shared.pingProtocol
-        let ms = await Pinger.ping(host: server.host, port: server.port, protocol: proto)
+        let ms = await Pinger.ping(host: server.host, port: server.port)
         self.pings[server.id] = ms ?? -1
     }
 }
 
-// MARK: - VPNController (без изменений в логике — работает в 1.1)
+// MARK: - VPNController
 
 final class VPNController: ObservableObject {
     @Published var status: NEVPNStatus = .disconnected
@@ -836,6 +835,26 @@ final class VPNController: ObservableObject {
         switch status {
         case .connected, .connecting, .reasserting: return true
         default: return false
+        }
+    }
+
+    // Удаляет все сохранённые VPN-профили Eclipse.
+    // Используется кнопкой «Удалить все VPN-профили» в настройках.
+    func removeAllProfiles() {
+        NETunnelProviderManager.loadAllFromPreferences { [weak self] managers, _ in
+            guard let self = self else { return }
+            let group = DispatchGroup()
+            for m in managers ?? [] {
+                group.enter()
+                m.removeFromPreferences { _ in group.leave() }
+            }
+            group.notify(queue: .main) {
+                self.manager = nil
+                self.status = .disconnected
+                self.previous = .disconnected
+                self.connectedAt = nil
+                self.error = nil
+            }
         }
     }
 
