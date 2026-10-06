@@ -102,7 +102,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             return fail(TunnelError.badConfig(Cfg.missingKeys(proto?.providerConfiguration)), completionHandler)
         }
         cfg = c
-        log("сервер \(c.host):\(c.serverPort), ядро=\(c.core), udp=\(c.udp), mtu=\(c.opts.mtu), dns=\(c.opts.dns.joined(separator: ","))\(c.opts.dohURL.map { " (DoH)" } ?? "")")
+        log("сервер \(c.host):\(c.serverPort), ядро=\(c.core), udp=\(c.udp), mtu=\(c.opts.mtu), dns=\(c.opts.dns.joined(separator: ","))\(c.opts.dohURL != nil ? " (DoH)" : "")")
         log("автопереключение: \(c.autoSwitch ? "вкл, запасных серверов \(max(0, c.fallbacks.count - 1))" : "выкл")")
 
         Task {
