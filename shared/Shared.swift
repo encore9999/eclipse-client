@@ -25,6 +25,25 @@ enum TunnelKeys {
     static let options = "options"
     static let core = "core"          // "xray" | "singbox"
     static let udpServer = "udpServer" // true для QUIC-протоколов (hysteria2, tuic)
+    static let serverID = "serverID"
+    static let serverName = "serverName"
+    static let autoSwitch = "autoSwitch"
+    static let fallbacks = "fallbacks"   // JSON [FallbackProfile]
+}
+
+/// Готовый к запуску профиль запасного сервера. Расширение переключается на него само,
+/// даже когда приложение свёрнуто и не может ничего сделать.
+struct FallbackProfile: Codable {
+    var id: String
+    var name: String
+    var host: String
+    var port: Int
+    var core: String
+    var udp: Bool
+    var json: String
+    var socksPort: Int
+    var socksUser: String
+    var socksPass: String
 }
 
 struct TunnelOptions: Codable, Equatable {
@@ -36,6 +55,8 @@ struct TunnelOptions: Codable, Equatable {
     var bypassLAN = true
     var directRules: [String] = []
     var memoryLimit: Int = 50
+    /// Если задан - системный DNS идёт поверх HTTPS (DoH), dns[] служат адресами для начального разрешения.
+    var dohURL: String? = nil
 
     var json: String {
         guard let d = try? JSONEncoder().encode(self) else { return "{}" }

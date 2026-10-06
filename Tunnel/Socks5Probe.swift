@@ -8,8 +8,18 @@ enum Socks5Probe {
 
     private struct ProbeError: Error { let msg: String }
 
-    static func check(port: Int, user: String, pass: String,
-                      host: String = "cp.cloudflare.com", timeout: TimeInterval = 10) async -> Result {
+    /// Пробуем два независимых адреса: если один недоступен из региона сервера, это не считается сбоем.
+    static func check(port: Int, user: String, pass: String, timeout: TimeInterval = 8) async -> Result {
+        var last = Result(ok: false, text: "нет ответа")
+        for host in ["cp.cloudflare.com", "connectivitycheck.gstatic.com"] {
+            last = await checkOne(port: port, user: user, pass: pass, host: host, timeout: timeout)
+            if last.ok { return last }
+        }
+        return last
+    }
+
+    private static func checkOne(port: Int, user: String, pass: String,
+                                 host: String, timeout: TimeInterval) async -> Result {
         guard let p = NWEndpoint.Port(rawValue: UInt16(port)) else { return Result(ok: false, text: "плохой порт") }
         let conn = NWConnection(host: "127.0.0.1", port: p, using: .tcp)
         let start = DispatchTime.now().uptimeNanoseconds

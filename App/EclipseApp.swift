@@ -134,11 +134,21 @@ struct RootView: View {
         }
         .accentColor(Theme.accentLight)
         .onAppear {
+            vpn.store = store
+            vpn.onAutoSwitch = { id, name in
+                guard store.selectedID != id, store.allServers.contains(where: { $0.id == id }) else { return }
+                store.selectedID = id
+                ToastCenter.shared.show("Автопереключение: теперь \(name)", .info)
+            }
             vpn.load()
             Task { await store.autoRefresh() }
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
             vpn.load()   // пересинхронизируем статус: расширение могло упасть, пока приложение спало
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { vpn.syncActiveServer() }
+        }
+        .onReceive(Timer.publish(every: 10, on: .main, in: .common).autoconnect()) { _ in
+            vpn.syncActiveServer()   // расширение могло само перейти на другой сервер
         }
     }
 }
@@ -550,6 +560,10 @@ struct SubGroup: Identifiable, Codable, Equatable {
     /// "Био" подписки (заголовок announce, как в Happ)
     var announce: String? = nil
     var announceURL: String? = nil
+    /// DNS подписки: nil - как в общих настройках
+    var dnsPreset: String? = nil
+    var dnsCustom: String? = nil
+    var dnsDoH: Bool? = nil
 
     var pingDisplayOverride: PingDisplay? {
         get { pingDisplayRaw.flatMap { PingDisplay(rawValue: $0) } }
@@ -658,15 +672,44 @@ final class Store: ObservableObject {
                              updateIntervalHours: Int?,
                              pingDisplay: PingDisplay?,
                              pingProtocol: PingProtocol?,
-                             tunnelDNS: [String]?) {
+                             dnsPreset: String?, dnsCustom: String?, dnsDoH: Bool?) {
         guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return }
         if let name = name, !name.isEmpty { groups[i].name = name }
         if let url = url { groups[i].url = url }
         groups[i].updateIntervalHours = updateIntervalHours
         groups[i].pingDisplayOverride = pingDisplay
         groups[i].pingProtocolOverride = pingProtocol
-        groups[i].tunnelDNS = tunnelDNS
+        groups[i].tunnelDNS = nil          // старое поле: теперь DNS задаётся тремя полями ниже
+        groups[i].dnsPreset = dnsPreset
+        groups[i].dnsCustom = dnsCustom
+        groups[i].dnsDoH = dnsDoH
         ToastCenter.shared.show("Настройки подписки сохранены")
+    }
+
+    /// Параметры туннеля для конкретного сервера: общие настройки + DNS его подписки.
+    func options(for server: Server) -> TunnelOptions {
+        var o = AppSettings.shared.tunnelOptions
+        guard let g = groups.first(where: { $0.servers.contains(where: { $0.id == server.id }) }) else { return o }
+        if let raw = g.dnsPreset, let preset = DNSPreset(rawValue: raw) {
+            let r = AppSettings.resolveDNS(preset: preset, custom: g.dnsCustom ?? "", doh: g.dnsDoH ?? false)
+            o.dns = r.ips
+            o.dohURL = r.dohURL
+        } else if let legacy = g.tunnelDNS?.filter({ AppSettings.isIP($0) }), !legacy.isEmpty {
+            o.dns = legacy
+            o.dohURL = nil
+        }
+        return o
+    }
+
+    /// Запасные серверы для автопереключения: та же подписка, сначала с лучшим пингом.
+    func fallbackCandidates(for server: Server, limit: Int = 5) -> [Server] {
+        guard let g = groups.first(where: { $0.servers.contains(where: { $0.id == server.id }) }) else { return [] }
+        let others = g.servers.filter { $0.id != server.id }
+        func rank(_ s: Server) -> (Int, Int) {
+            guard let p = pings[s.id] else { return (1, 0) }       // не мерили - после рабочих
+            return p >= 0 ? (0, p) : (2, 0)                        // не ответил - в самый конец
+        }
+        return Array(others.sorted { rank($0) < rank($1) }.prefix(limit))
     }
 
     private func addManual(_ server: Server) {
@@ -1013,6 +1056,17 @@ final class VPNController: ObservableObject {
         } catch { done(nil) }
     }
 
+    /// Спрашиваем расширение, какой сервер активен сейчас: оно могло переключиться само.
+    func syncActiveServer() {
+        guard status == .connected else { return }
+        sendMessage("active") { [weak self] r in
+            guard let r = r, let sep = r.firstIndex(of: "|") else { return }
+            let idStr = String(r[..<sep]), name = String(r[r.index(after: sep)...])
+            guard let id = UUID(uuidString: idStr) else { return }
+            DispatchQueue.main.async { self?.onAutoSwitch?(id, name) }
+        }
+    }
+
     /// Журнал туннеля прямо из работающего расширения.
     func fetchTunnelLog(_ done: @escaping (String) -> Void) {
         sendMessage("logs") { r in DispatchQueue.main.async { done(r ?? "") } }
@@ -1106,6 +1160,11 @@ final class VPNController: ObservableObject {
         start(server)
     }
 
+    /// Задаётся из RootView. Нужен, чтобы брать DNS подписки и запасные серверы.
+    weak var store: Store?
+    /// Вызывается, когда расширение само переключилось на другой сервер.
+    var onAutoSwitch: ((UUID, String) -> Void)?
+
     private func start(_ server: Server) {
         error = nil
         userStopped = false
@@ -1113,14 +1172,32 @@ final class VPNController: ObservableObject {
         SharedLog.clear()
         SharedLog.write("[app] Eclipse \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"), iOS \(UIDevice.current.systemVersion), \(AppSettings.modelIdentifier), appGroup=\(AppGroup.available ? "ok" : "НЕТ")")
         SharedLog.write("[app] старт: \(server.protocolLabel) \(server.host):\(server.port), ядро=\(server.core), killSwitch=\(killSwitch), onDemand=\(AppSettings.shared.onDemand)")
+        let opts = store?.options(for: server) ?? AppSettings.shared.tunnelOptions
         let profile: XrayProfile
         do {
-            profile = try XrayConfigBuilder.build(for: server, options: AppSettings.shared.tunnelOptions, logPath: nil)
+            profile = try XrayConfigBuilder.build(for: server, options: opts, logPath: nil)
         } catch {
             self.error = Sanitizer.clean(error.localizedDescription)
             return
         }
-        SharedLog.write("[app] конфиг Xray собран (\(profile.json.count) байт)")
+        SharedLog.write("[app] конфиг собран (\(profile.json.count) байт), DNS: \(opts.dns.joined(separator: ","))\(opts.dohURL != nil ? " + DoH" : "")")
+
+        // Запасные серверы для автопереключения (первым идёт выбранный)
+        var pool: [FallbackProfile] = []
+        if AppSettings.shared.autoSwitch, let st = store {
+            let others = st.fallbackCandidates(for: server)
+            for srv in [server] + others {
+                let prof: XrayProfile
+                if srv.id == server.id { prof = profile }
+                else if let p = try? XrayConfigBuilder.build(for: srv, options: opts, logPath: nil) { prof = p }
+                else { continue }
+                pool.append(FallbackProfile(id: srv.id.uuidString, name: srv.name, host: srv.host, port: srv.port,
+                                            core: prof.core, udp: srv.isUDPBased, json: prof.json,
+                                            socksPort: prof.socksPort, socksUser: prof.socksUser, socksPass: prof.socksPass))
+            }
+            SharedLog.write("[app] автопереключение: в пуле \(pool.count) серверов")
+        }
+        let poolJSON = (try? JSONEncoder().encode(pool)).map { String(decoding: $0, as: UTF8.self) } ?? "[]"
 
         NETunnelProviderManager.loadAllFromPreferences { [weak self] managers, _ in
             guard let self = self else { return }
@@ -1130,11 +1207,11 @@ final class VPNController: ObservableObject {
             if [.connecting, .reasserting, .disconnecting, .connected].contains(m.connection.status) {
                 m.connection.stopVPNTunnel()
                 self.waitDisconnected(m.connection, deadline: Date().addingTimeInterval(4)) {
-                    self.configureAndStart(m, server: server, profile: profile)
+                    self.configureAndStart(m, server: server, profile: profile, options: opts, poolJSON: poolJSON)
                 }
                 return
             }
-            self.configureAndStart(m, server: server, profile: profile)
+            self.configureAndStart(m, server: server, profile: profile, options: opts, poolJSON: poolJSON)
         }
     }
 
@@ -1162,7 +1239,8 @@ final class VPNController: ObservableObject {
         }
     }
 
-    private func configureAndStart(_ m: NETunnelProviderManager, server: Server, profile: XrayProfile) {
+    private func configureAndStart(_ m: NETunnelProviderManager, server: Server, profile: XrayProfile,
+                                   options: TunnelOptions, poolJSON: String) {
         let proto = NETunnelProviderProtocol()
             proto.providerBundleIdentifier = self.tunnelBundleID
             proto.serverAddress = server.host
@@ -1173,9 +1251,13 @@ final class VPNController: ObservableObject {
                 TunnelKeys.socksPass: profile.socksPass,
                 TunnelKeys.serverHost: server.host,
                 TunnelKeys.serverPort: server.port,
-                TunnelKeys.options: AppSettings.shared.tunnelOptions.json,
+                TunnelKeys.options: options.json,
                 TunnelKeys.core: profile.core,
-                TunnelKeys.udpServer: server.isUDPBased
+                TunnelKeys.udpServer: server.isUDPBased,
+                TunnelKeys.serverID: server.id.uuidString,
+                TunnelKeys.serverName: server.name,
+                TunnelKeys.autoSwitch: AppSettings.shared.autoSwitch,
+                TunnelKeys.fallbacks: poolJSON
             ]
             proto.includeAllNetworks = self.killSwitch
             proto.excludeLocalNetworks = true
@@ -2300,7 +2382,9 @@ struct SubscriptionSettingsSheet: View {
     @State private var updateHours: Int
     @State private var pingDisplay: PingDisplay
     @State private var pingProtocol: PingProtocol
-    @State private var tunnelDNS: String
+    @State private var dnsChoice: String      // "" - как в общих настройках
+    @State private var dnsCustom: String
+    @State private var dnsDoH: Bool
 
     init(group: SubGroup) {
         self.group = group
@@ -2310,7 +2394,17 @@ struct SubscriptionSettingsSheet: View {
         _updateHours = State(initialValue: group.updateIntervalHours ?? 12)
         _pingDisplay = State(initialValue: group.pingDisplayOverride ?? .time)
         _pingProtocol = State(initialValue: group.pingProtocolOverride ?? .tcp)
-        _tunnelDNS = State(initialValue: (group.tunnelDNS ?? []).joined(separator: ", "))
+        if let p = group.dnsPreset {
+            _dnsChoice = State(initialValue: p)
+            _dnsCustom = State(initialValue: group.dnsCustom ?? "")
+        } else if let legacy = group.tunnelDNS, !legacy.isEmpty {
+            _dnsChoice = State(initialValue: DNSPreset.custom.rawValue)
+            _dnsCustom = State(initialValue: legacy.joined(separator: ", "))
+        } else {
+            _dnsChoice = State(initialValue: "")
+            _dnsCustom = State(initialValue: "")
+        }
+        _dnsDoH = State(initialValue: group.dnsDoH ?? false)
     }
 
     var body: some View {
@@ -2345,8 +2439,20 @@ struct SubscriptionSettingsSheet: View {
                             .foregroundColor(Theme.muted)
                     }
                     section("DNS туннеля", icon: "globe",
-                            footer: "Свои DNS-серверы для этой подписки. Через запятую. Пусто - глобальные.") {
-                        field("DNS через запятую", text: $tunnelDNS)
+                            footer: "DNS-сервер только для этой подписки. Для своего укажите IP через запятую или адрес DoH (https://…).") {
+                        MenuRow(title: "Сервер", selection: $dnsChoice,
+                                options: [("", "Как в общих настройках")]
+                                    + DNSPreset.allCases.map { ($0.rawValue, $0.title) })
+                        if let p = DNSPreset(rawValue: dnsChoice) {
+                            Text(p.subtitle).font(.system(size: 11)).foregroundColor(Theme.muted)
+                            if p == .custom {
+                                field("1.1.1.1 или https://dns.example/dns-query", text: $dnsCustom)
+                            } else {
+                                ToggleRow(title: "DNS поверх HTTPS (DoH)",
+                                          subtitle: "Шифровать DNS-запросы этой подписки",
+                                          isOn: $dnsDoH)
+                            }
+                        }
                     }
                 }
                 .padding(20)
@@ -2370,10 +2476,6 @@ struct SubscriptionSettingsSheet: View {
     }
 
     private func save() {
-        let dnsList = tunnelDNS
-            .components(separatedBy: CharacterSet(charactersIn: ", \n;"))
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
         store.updateGroupSettings(
             group.id,
             name: name.trimmingCharacters(in: .whitespaces),
@@ -2381,7 +2483,9 @@ struct SubscriptionSettingsSheet: View {
             updateIntervalHours: updateEnabled ? updateHours : nil,
             pingDisplay: pingDisplay,
             pingProtocol: pingProtocol,
-            tunnelDNS: dnsList.isEmpty ? nil : dnsList
+            dnsPreset: dnsChoice.isEmpty ? nil : dnsChoice,
+            dnsCustom: dnsChoice == DNSPreset.custom.rawValue ? dnsCustom.trimmingCharacters(in: .whitespaces) : nil,
+            dnsDoH: dnsChoice.isEmpty ? nil : dnsDoH
         )
         dismiss()
     }
@@ -2475,6 +2579,25 @@ enum DNSPreset: String, CaseIterable, Identifiable {
         case .adguard: return ["94.140.14.14", "94.140.15.15"]
         }
     }
+    /// Адрес DoH-эндпоинта. У "Свой" его нет - пользователь вводит https://… сам.
+    var dohURL: String? {
+        switch self {
+        case .cloudflare: return "https://cloudflare-dns.com/dns-query"
+        case .google: return "https://dns.google/dns-query"
+        case .quad9: return "https://dns.quad9.net/dns-query"
+        case .adguard: return "https://dns.adguard-dns.com/dns-query"
+        case .custom: return nil
+        }
+    }
+    var subtitle: String {
+        switch self {
+        case .cloudflare: return "1.1.1.1 · быстрый, без фильтрации"
+        case .google: return "8.8.8.8 · быстрый"
+        case .quad9: return "9.9.9.9 · блокирует вредоносные домены"
+        case .adguard: return "блокирует рекламу и трекеры"
+        case .custom: return "IP или https://… (DoH)"
+        }
+    }
 }
 
 enum UAPreset: String, CaseIterable, Identifiable {
@@ -2524,6 +2647,8 @@ final class AppSettings: ObservableObject {
     @Published var pingDisplay: PingDisplay { didSet { save(pingDisplay.rawValue, "pingDisplay") } }
     @Published var pingProtocol: PingProtocol { didSet { save(pingProtocol.rawValue, "pingProtocol") } }
     @Published var appearance: AppearanceMode { didSet { save(appearance.rawValue, "appearance") } }
+    @Published var dnsOverHTTPS: Bool { didSet { save(dnsOverHTTPS, "dnsOverHTTPS") } }
+    @Published var autoSwitch: Bool { didSet { save(autoSwitch, "autoSwitch") } }
 
     private func save(_ v: Any, _ key: String) {
         UserDefaults.standard.set(v, forKey: Self.keyPrefix + key)
@@ -2558,6 +2683,8 @@ final class AppSettings: ObservableObject {
         pingDisplay = PingDisplay(rawValue: s("pingDisplay", "time")) ?? .time
         pingProtocol = PingProtocol(rawValue: s("pingProtocol", "tcp")) ?? .tcp
         appearance = AppearanceMode(rawValue: s("appearance", "dark")) ?? .dark
+        dnsOverHTTPS = b("dnsOverHTTPS", false)
+        autoSwitch = b("autoSwitch", true)
     }
 
     func reset() {
@@ -2571,6 +2698,7 @@ final class AppSettings: ObservableObject {
         uaPreset = .eclipse; customUA = ""; sendHWID = false; sortByPing = false
         pingDisplay = .time; pingProtocol = .tcp
         appearance = .dark
+        dnsOverHTTPS = false; autoSwitch = true
     }
 
     static func isIP(_ s: String) -> Bool {
@@ -2578,18 +2706,30 @@ final class AppSettings: ObservableObject {
         return inet_pton(AF_INET, s, &a) == 1 || inet_pton(AF_INET6, s, &b) == 1
     }
 
-    var resolvedDNS: [String] {
-        guard dnsPreset == .custom else { return dnsPreset.servers }
-        let items = customDNS
-            .components(separatedBy: CharacterSet(charactersIn: ", \n;"))
-            .filter { !$0.isEmpty && AppSettings.isIP($0) }
-        return items.isEmpty ? DNSPreset.cloudflare.servers : items
+    /// Единая логика для общих настроек и настроек подписки.
+    /// Возвращает IP-адреса и (если нужен DNS поверх HTTPS) адрес DoH.
+    static func resolveDNS(preset: DNSPreset, custom: String, doh: Bool) -> (ips: [String], dohURL: String?) {
+        guard preset == .custom else {
+            return (preset.servers, doh ? preset.dohURL : nil)
+        }
+        var ips: [String] = [], url: String?
+        for item in custom.components(separatedBy: CharacterSet(charactersIn: ", \n;")) where !item.isEmpty {
+            if item.lowercased().hasPrefix("https://"), URL(string: item) != nil { url = item }
+            else if isIP(item) { ips.append(item) }
+        }
+        // Для DoH нужны IP только для начального разрешения адреса сервера - берём Cloudflare, если не указаны.
+        if ips.isEmpty { ips = DNSPreset.cloudflare.servers }
+        return (ips, url)   // свой https:// включает DoH сам по себе
     }
+
+    var resolvedDNS: [String] { Self.resolveDNS(preset: dnsPreset, custom: customDNS, doh: dnsOverHTTPS).ips }
 
     var tunnelOptions: TunnelOptions {
         var o = TunnelOptions()
         o.mtu = mtu
-        o.dns = resolvedDNS
+        let r = Self.resolveDNS(preset: dnsPreset, custom: customDNS, doh: dnsOverHTTPS)
+        o.dns = r.ips
+        o.dohURL = r.dohURL
         o.mux = mux
         o.fragment = fragment
         o.sniffing = sniffing
@@ -2904,7 +3044,7 @@ struct SettingsView: View {
 
                     SectionHeader("Соединение")
                     SettingsCategoryRow(title: "Соединение",
-                                        subtitle: "Kill-switch, автоподключение, MTU",
+                                        subtitle: "Kill-switch, автопереключение, MTU",
                                         icon: "antenna.radiowaves.left.and.right") {
                         SettingsPage("Соединение", icon: "antenna.radiowaves.left.and.right") {
                             SettingsSection("Безопасность", icon: "lock.shield",
@@ -2915,6 +3055,12 @@ struct SettingsView: View {
                                 ToggleRow(title: "Автоподключение",
                                           subtitle: "iOS сама включит VPN, когда появится сеть",
                                           isOn: $settings.onDemand)
+                            }
+                            SettingsSection("Надёжность", icon: "arrow.triangle.swap",
+                                            footer: "Каждые 15 секунд проверяется, что трафик идёт. После трёх сбоев подряд клиент сам переключится на следующий сервер этой подписки, даже если приложение свёрнуто. Применяется при следующем подключении.") {
+                                ToggleRow(title: "Автопереключение",
+                                          subtitle: "Перейти на рабочий сервер, если текущий перестал отвечать",
+                                          isOn: $settings.autoSwitch)
                             }
                             SettingsSection("Параметры", icon: "slider.horizontal.3") {
                                 MenuRow(title: "MTU", selection: $settings.mtu,
@@ -2929,11 +3075,25 @@ struct SettingsView: View {
                                         icon: "globe", color: Color(hex: 0x4ADE80)) {
                         SettingsPage("DNS", icon: "globe") {
                             SettingsSection("Сервер", icon: "server.rack",
-                                            footer: "DNS применяется системно и внутри ядра. Для своего DNS укажите IP через запятую.") {
+                                            footer: "DNS применяется системно и внутри ядра. Для своего DNS укажите IP через запятую или адрес DoH (https://…).") {
                                 MenuRow(title: "Сервер", selection: $settings.dnsPreset,
                                         options: DNSPreset.allCases.map { ($0, $0.title) })
+                                Text(settings.dnsPreset.subtitle)
+                                    .font(.system(size: 11)).foregroundColor(Theme.muted)
                                 if settings.dnsPreset == .custom {
-                                    SettingsField(placeholder: "1.1.1.1, 8.8.8.8", text: $settings.customDNS)
+                                    SettingsField(placeholder: "1.1.1.1, 8.8.8.8 или https://dns.example/dns-query",
+                                                  text: $settings.customDNS)
+                                }
+                            }
+                            SettingsSection("Шифрование", icon: "lock.shield",
+                                            footer: "DNS поверх HTTPS скрывает ваши запросы от провайдера и не даёт их подменить. Запросы идут через туннель.") {
+                                if settings.dnsPreset == .custom {
+                                    Text("Для своего сервера DoH включается, если указан адрес https://…")
+                                        .font(.system(size: 12)).foregroundColor(Theme.muted)
+                                } else {
+                                    ToggleRow(title: "DNS поверх HTTPS (DoH)",
+                                              subtitle: "Использовать DoH выбранного провайдера",
+                                              isOn: $settings.dnsOverHTTPS)
                                 }
                             }
                         }

@@ -32,9 +32,18 @@ enum TunnelError: LocalizedError, CustomNSError {
 final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     private struct Cfg {
-        let json: String, port: Int, user: String, pass: String, host: String, serverPort: Int
+        var json: String, port: Int, user: String, pass: String, host: String, serverPort: Int
         let opts: TunnelOptions
-        let core: String, udp: Bool
+        var core: String, udp: Bool
+        var serverID: String, serverName: String
+        let autoSwitch: Bool
+        let fallbacks: [FallbackProfile]
+
+        mutating func adopt(_ f: FallbackProfile) {
+            json = f.json; port = f.socksPort; user = f.socksUser; pass = f.socksPass
+            host = f.host; serverPort = f.port; core = f.core; udp = f.udp
+            serverID = f.id; serverName = f.name
+        }
         static func missingKeys(_ p: [String: Any]?) -> String {
             guard let p = p else { return "providerConfiguration пуст" }
             let need = [TunnelKeys.xrayConfig, TunnelKeys.socksPort, TunnelKeys.socksUser,
@@ -54,6 +63,15 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             opts = TunnelOptions.from(json: p[TunnelKeys.options] as? String)
             core = (p[TunnelKeys.core] as? String) ?? "xray"
             udp = (p[TunnelKeys.udpServer] as? Bool) ?? false
+            serverID = (p[TunnelKeys.serverID] as? String) ?? ""
+            serverName = (p[TunnelKeys.serverName] as? String) ?? h
+            autoSwitch = (p[TunnelKeys.autoSwitch] as? Bool) ?? false
+            if let fj = p[TunnelKeys.fallbacks] as? String, let fd = fj.data(using: .utf8),
+               let list = try? JSONDecoder().decode([FallbackProfile].self, from: fd) {
+                fallbacks = list
+            } else {
+                fallbacks = []
+            }
         }
     }
 
@@ -66,6 +84,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var restarting = false
     private var t2sRunning = false
     private let t2sGroup = DispatchGroup()
+    private var healthTimer: DispatchSourceTimer?
+    private var probing = false
+    private var pathOK = true
+    private var failStreak = 0
+    private let failThreshold = 3
 
     override func startTunnel(options: [String: NSObject]?, completionHandler: @escaping (Error?) -> Void) {
         AppGroup.defaults.removeObject(forKey: TunnelKeys.lastError)
@@ -79,7 +102,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             return fail(TunnelError.badConfig(Cfg.missingKeys(proto?.providerConfiguration)), completionHandler)
         }
         cfg = c
-        log("сервер \(c.host):\(c.serverPort), ядро=\(c.core), udp=\(c.udp), mtu=\(c.opts.mtu), dns=\(c.opts.dns.joined(separator: ","))")
+        log("сервер \(c.host):\(c.serverPort), ядро=\(c.core), udp=\(c.udp), mtu=\(c.opts.mtu), dns=\(c.opts.dns.joined(separator: ","))\(c.opts.dohURL.map { " (DoH)" } ?? "")")
+        log("автопереключение: \(c.autoSwitch ? "вкл, запасных серверов \(max(0, c.fallbacks.count - 1))" : "выкл")")
 
         Task {
             do {
@@ -97,6 +121,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 log("сетевые настройки применены")
                 startTun2Socks(c)
                 startMonitor()
+                startHealthLoop()
                 log("tunnel up")
                 completionHandler(nil)
                 scheduleHealthCheck(delay: 1.5)
@@ -118,6 +143,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             let core = coreLogTail()
             if !core.isEmpty { out += "\n--- журнал ядра ---\n" + core }
             completionHandler?(out.data(using: .utf8))
+        case "active":
+            let c = cfg
+            completionHandler?("\(c?.serverID ?? "")|\(c?.serverName ?? "")".data(using: .utf8))
         case "health":
             guard let c = cfg else { completionHandler?("нет конфигурации".data(using: .utf8)); return }
             Task {
@@ -178,6 +206,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         monitor?.cancel(); monitor = nil
         // Ждём, пока tun2socks реально остановится: иначе быстрый повторный старт
         // (смена сервера) натыкается на ещё живой экземпляр и туннель больше не поднимается.
+        healthTimer?.cancel(); healthTimer = nil
         stopTun2Socks()
         XraybridgeStop()
         completionHandler()
@@ -209,8 +238,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// Смена сети: перезапускаем ядро И tun2socks. Раньше перезапускалось только ядро,
     /// и UDP-сессии tun2socks (DNS, QUIC) оставались мёртвыми - интернет "пропадал".
     private func restartStack() {
-        guard !stopping, let c = cfg else { return }
+        guard !stopping, !restarting, let c = cfg else { return }
         log("network changed → restart core + tun2socks")
+        failStreak = 0
         reasserting = true
         restarting = true
         stopTun2Socks()
@@ -283,9 +313,18 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         ]
         s.ipv6Settings = v6
 
-        let dns = NEDNSSettings(servers: c.opts.dns.isEmpty ? ["1.1.1.1", "1.0.0.1"] : c.opts.dns)
-        dns.matchDomains = [""]
-        s.dnsSettings = dns
+        let ips = c.opts.dns.isEmpty ? ["1.1.1.1", "1.0.0.1"] : c.opts.dns
+        if let u = c.opts.dohURL, let url = URL(string: u), url.scheme?.lowercased() == "https" {
+            // DNS поверх HTTPS: запросы системы шифруются и идут через туннель
+            let doh = NEDNSOverHTTPSSettings(servers: ips)
+            doh.serverURL = url
+            doh.matchDomains = [""]
+            s.dnsSettings = doh
+        } else {
+            let dns = NEDNSSettings(servers: ips)
+            dns.matchDomains = [""]
+            s.dnsSettings = dns
+        }
         return s
     }
 
@@ -299,6 +338,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private func handle(_ path: Network.NWPath) {
         let ifs = [(NWInterface.InterfaceType.wifi, "w"), (.cellular, "c"), (.wiredEthernet, "e")]
             .filter { path.usesInterfaceType($0.0) }.map { $0.1 }.joined()
+        pathOK = path.status == .satisfied
         let sig = "\(path.status)|\(ifs)"
         guard let prev = lastSignature else { lastSignature = sig; return }
         guard sig != prev else { return }
@@ -309,6 +349,98 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let w = DispatchWorkItem { [weak self] in self?.restartStack() }
         restartWork = w
         queue.asyncAfter(deadline: .now() + 1, execute: w)
+    }
+
+    // MARK: автопереключение
+
+    /// Раз в 15 секунд проверяем, что трафик реально идёт. После 3 провалов подряд (~45 с)
+    /// переходим на следующий сервер подписки - даже если приложение свёрнуто.
+    private func startHealthLoop() {
+        healthTimer?.cancel()
+        failStreak = 0
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now() + 20, repeating: 15)
+        t.setEventHandler { [weak self] in self?.healthTick() }
+        t.resume()
+        healthTimer = t
+    }
+
+    private func healthTick() {
+        guard !stopping, !restarting, !probing, pathOK, let c = cfg, c.autoSwitch, c.fallbacks.count > 1 else { return }
+        probing = true
+        Task { [weak self] in
+            let r = await Socks5Probe.check(port: c.port, user: c.user, pass: c.pass, timeout: 6)
+            guard let self = self else { return }
+            self.queue.async {
+                self.probing = false
+                // за время проверки конфиг мог смениться (смена сети, переключение) - тогда результат устарел
+                guard !self.stopping, !self.restarting, self.cfg?.serverID == c.serverID else { return }
+                if r.ok {
+                    if self.failStreak > 0 { self.log("health: связь восстановилась") }
+                    self.failStreak = 0
+                    return
+                }
+                self.failStreak += 1
+                self.log("health: сбой \(self.failStreak)/\(self.failThreshold) - \(r.text)")
+                if self.failStreak >= self.failThreshold {
+                    self.failStreak = 0
+                    Task { await self.switchToNextServer(reason: r.text) }
+                }
+            }
+        }
+    }
+
+    /// Перебирает запасные серверы по кругу и останавливается на первом, через который проходит трафик.
+    private func switchToNextServer(reason: String) async {
+        guard !stopping, !restarting, let original = cfg else { return }
+        let pool = original.fallbacks
+        guard original.autoSwitch, pool.count > 1 else { return }
+        restarting = true
+        reasserting = true
+        log("автопереключение: \(original.serverName) не работает (\(reason)), ищем замену")
+        stopTun2Socks()
+        XraybridgeStop()
+
+        var idx = pool.firstIndex { $0.id == original.serverID } ?? -1
+        for _ in 0..<(pool.count - 1) {
+            idx = (idx + 1) % pool.count
+            let f = pool[idx]
+            if f.id == original.serverID { continue }
+            var next = original
+            next.adopt(f)
+            cfg = next
+            do {
+                try startCore()
+                startTun2Socks(next)
+            } catch {
+                log("автопереключение: \(f.name) не запустился (\(error.localizedDescription))")
+                stopTun2Socks(); XraybridgeStop()
+                continue
+            }
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            let r = await Socks5Probe.check(port: next.port, user: next.user, pass: next.pass, timeout: 6)
+            if r.ok {
+                log("автопереключение: теперь \(f.name) - \(r.text)")
+                AppGroup.defaults.set(f.id, forKey: "activeServerID")
+                restarting = false
+                reasserting = false
+                return
+            }
+            log("автопереключение: \(f.name) тоже не отвечает (\(r.text))")
+            stopTun2Socks(); XraybridgeStop()
+        }
+
+        // Ничего не подошло - возвращаем выбранный пользователем сервер, пусть ядро пробует дальше.
+        log("автопереключение: рабочих серверов не нашлось, возвращаем \(original.serverName)")
+        cfg = original
+        do { try startCore(); startTun2Socks(original) }
+        catch {
+            restarting = false
+            cancelTunnelWithError(error is TunnelError ? error : TunnelError.xray(error.localizedDescription))
+            return
+        }
+        restarting = false
+        reasserting = false
     }
 
     private func fail(_ error: Error, _ completion: @escaping (Error?) -> Void) {
