@@ -23,8 +23,8 @@ enum XrayConfigError: LocalizedError {
 enum XrayConfigBuilder {
     static func build(for server: Server, options: TunnelOptions = TunnelOptions(),
                       logPath: String?, socksPort: Int = 10808) throws -> XrayProfile {
-        // TUIC в Xray-core не поддерживается - его обслуживает sing-box.
-        if server.proto == "tuic" {
+        // TUIC и Hysteria2 обслуживает sing-box.
+        if server.core == "singbox" {
             return try SingboxConfigBuilder.build(for: server, options: options, socksPort: socksPort)
         }
         let user = token(8), pass = token(16)

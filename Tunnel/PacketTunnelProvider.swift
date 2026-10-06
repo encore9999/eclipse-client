@@ -3,17 +3,30 @@ import Network
 import Xray
 import Tun2SocksKit
 
-enum TunnelError: LocalizedError {
-    case badConfig, serverUnreachable(String), xray(String), settings(String), tun2socks(Int32)
+enum TunnelError: LocalizedError, CustomNSError {
+    case badConfig(String), serverUnreachable(String), xray(String), settings(String), tun2socks(Int32)
+
     var errorDescription: String? {
         switch self {
-        case .badConfig: return "Некорректная конфигурация туннеля"
+        case .badConfig(let m): return "Некорректная конфигурация туннеля (\(m))"
         case .serverUnreachable(let h): return "Сервер недоступен: \(h)"
-        case .xray(let m): return "Ошибка Xray: \(m)"
+        case .xray(let m): return "Ошибка ядра: \(m)"
         case .settings(let m): return "Не удалось применить сетевые настройки: \(m)"
         case .tun2socks(let c): return "Туннель остановился (код \(c))"
         }
     }
+    // Без этого iOS показывает "EclipseTunnel.TunnelError error 0" вместо текста.
+    static var errorDomain: String { "Eclipse" }
+    var errorCode: Int {
+        switch self {
+        case .badConfig: return 1
+        case .serverUnreachable: return 2
+        case .xray: return 3
+        case .settings: return 4
+        case .tun2socks: return 5
+        }
+    }
+    var errorUserInfo: [String: Any] { [NSLocalizedDescriptionKey: errorDescription ?? "Ошибка туннеля"] }
 }
 
 final class PacketTunnelProvider: NEPacketTunnelProvider {
@@ -22,6 +35,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let json: String, port: Int, user: String, pass: String, host: String, serverPort: Int
         let opts: TunnelOptions
         let core: String, udp: Bool
+        static func missingKeys(_ p: [String: Any]?) -> String {
+            guard let p = p else { return "providerConfiguration пуст" }
+            let need = [TunnelKeys.xrayConfig, TunnelKeys.socksPort, TunnelKeys.socksUser,
+                        TunnelKeys.socksPass, TunnelKeys.serverHost, TunnelKeys.serverPort]
+            let miss = need.filter { p[$0] == nil }
+            return miss.isEmpty ? "неверный тип полей" : "нет полей: " + miss.joined(separator: ", ")
+        }
         init?(_ p: [String: Any]?) {
             guard let p = p,
                   let j = p[TunnelKeys.xrayConfig] as? String,
@@ -50,41 +70,105 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     override func startTunnel(options: [String: NSObject]?, completionHandler: @escaping (Error?) -> Void) {
         AppGroup.defaults.removeObject(forKey: TunnelKeys.lastError)
         stopping = false
-        log("startTunnel, xray \(XraybridgeVersion())")
+        restarting = false
+        let v = ProcessInfo.processInfo.operatingSystemVersion
+        log("startTunnel: iOS \(v.majorVersion).\(v.minorVersion), appGroup=\(AppGroup.available ? "ok" : "НЕТ"), xray \(XraybridgeVersion())")
 
         let proto = protocolConfiguration as? NETunnelProviderProtocol
         guard let c = Cfg(proto?.providerConfiguration) else {
-            return fail(TunnelError.badConfig, completionHandler)
+            return fail(TunnelError.badConfig(Cfg.missingKeys(proto?.providerConfiguration)), completionHandler)
         }
         cfg = c
+        log("сервер \(c.host):\(c.serverPort), ядро=\(c.core), udp=\(c.udp), mtu=\(c.opts.mtu), dns=\(c.opts.dns.joined(separator: ","))")
 
         Task {
             do {
-                // TCP-проверка нужна только для TCP-протоколов: у QUIC (Hysteria2/TUIC)
-                // TCP-порт закрыт, и раньше из-за этого они вообще не подключались.
-                // Три попытки - на мобильной сети первая часто падает при смене сети.
+                // Раньше недоступный по TCP сервер блокировал подключение. Теперь это только запись
+                // в журнал: подключаемся в любом случае, а ядро само покажет реальную ошибку.
                 if !c.udp {
-                    var ok = false
-                    for attempt in 1...3 {
-                        if await Pinger.ping(host: c.host, port: c.serverPort, timeout: 4) != nil { ok = true; break }
-                        log("precheck \(attempt)/3 failed")
-                        try? await Task.sleep(nanoseconds: 700_000_000)
-                    }
-                    if !ok { throw TunnelError.serverUnreachable(c.host) }
+                    let ms = await Pinger.ping(host: c.host, port: c.serverPort, timeout: 4)
+                    log(ms.map { "TCP до сервера: \($0) мс" } ?? "TCP до сервера: нет ответа (подключаемся всё равно)")
+                } else {
+                    log("QUIC-сервер: TCP-проверка пропущена")
                 }
                 try startCore()
                 do { try await setTunnelNetworkSettings(makeSettings(c)) }
                 catch { throw TunnelError.settings(error.localizedDescription) }
+                log("сетевые настройки применены")
                 startTun2Socks(c)
                 startMonitor()
                 log("tunnel up")
                 completionHandler(nil)
+                scheduleHealthCheck(delay: 1.5)
             } catch {
                 stopTun2Socks()
                 XraybridgeStop()
                 fail(error, completionHandler)
             }
         }
+    }
+
+    // MARK: связь с приложением (когда App Group недоступна, это единственный способ достать журнал)
+
+    override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)?) {
+        let cmd = String(data: messageData, encoding: .utf8) ?? ""
+        switch cmd {
+        case "logs":
+            var out = SharedLog.memoryDump()
+            let core = coreLogTail()
+            if !core.isEmpty { out += "\n--- журнал ядра ---\n" + core }
+            completionHandler?(out.data(using: .utf8))
+        case "health":
+            guard let c = cfg else { completionHandler?("нет конфигурации".data(using: .utf8)); return }
+            Task {
+                let r = await Socks5Probe.check(port: c.port, user: c.user, pass: c.pass)
+                self.log("health: \(r.text)")
+                completionHandler?("\(r.ok ? "OK" : "FAIL"): \(r.text)".data(using: .utf8))
+            }
+        default:
+            completionHandler?(nil)
+        }
+    }
+
+    /// Проверка "проходит ли трафик через ядро": SOCKS5 -> cp.cloudflare.com:80.
+    private func scheduleHealthCheck(delay: TimeInterval) {
+        guard let c = cfg else { return }
+        Task {
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            if self.stopping { return }
+            let r = await Socks5Probe.check(port: c.port, user: c.user, pass: c.pass)
+            self.log("health: \(r.text)")
+            if !r.ok {
+                let t = self.coreLogTail(lines: 12)
+                if !t.isEmpty { self.log("журнал ядра:\n" + t) }
+            }
+        }
+    }
+
+    // MARK: журнал ядра
+
+    private var coreLogURL: URL {
+        let dir = AppGroup.available ? AppGroup.container
+            : (FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+               ?? FileManager.default.temporaryDirectory)
+        return dir.appendingPathComponent("core.log")
+    }
+
+    private func coreLogTail(lines: Int = 60) -> String {
+        guard let t = try? String(contentsOf: coreLogURL), !t.isEmpty else { return "" }
+        return t.split(separator: "\n", omittingEmptySubsequences: true).suffix(lines).joined(separator: "\n")
+    }
+
+    /// Подставляет в конфиг ядра файл журнала (в песочнице расширения).
+    private func withCoreLog(_ json: String, core: String) -> String {
+        guard let d = json.data(using: .utf8),
+              var o = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] else { return json }
+        var l = (o["log"] as? [String: Any]) ?? [:]
+        if core == "singbox" { l["output"] = coreLogURL.path; l["level"] = "info" }
+        else { l["error"] = coreLogURL.path; l["loglevel"] = "warning" }
+        o["log"] = l
+        guard let out = try? JSONSerialization.data(withJSONObject: o, options: [.sortedKeys]) else { return json }
+        return String(decoding: out, as: UTF8.self)
     }
 
     override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
@@ -100,15 +184,17 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     private func startCore() throws {
-        guard let c = cfg else { throw TunnelError.badConfig }
+        guard let c = cfg else { throw TunnelError.badConfig("нет конфигурации") }
         let dir = AppGroup.container.appendingPathComponent("xray", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         XraybridgeSetMemoryLimit(Int32(c.opts.memoryLimit))
         log("core=\(c.core) memoryLimit=\(c.opts.memoryLimit) МБ")
+        try? FileManager.default.removeItem(at: coreLogURL)
+        let json = withCoreLog(c.json, core: c.core)
         var nsErr: NSError?
         let ok = c.core == "singbox"
-            ? XraybridgeStartSingbox(c.json, dir.path, &nsErr)
-            : XraybridgeStart(c.json, dir.path, &nsErr)
+            ? XraybridgeStartSingbox(json, dir.path, &nsErr)
+            : XraybridgeStart(json, dir.path, &nsErr)
         if !ok { throw TunnelError.xray(nsErr?.localizedDescription ?? "unknown") }
         log("core started")
     }
@@ -135,11 +221,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         } catch {
             restarting = false
             AppGroup.defaults.set(Sanitizer.clean(error.localizedDescription), forKey: TunnelKeys.lastError)
-            cancelTunnelWithError(error)
+            cancelTunnelWithError(error is TunnelError ? error : TunnelError.xray(error.localizedDescription))
             return
         }
         restarting = false
         reasserting = false
+        scheduleHealthCheck(delay: 2)
     }
 
     private func startTun2Socks(_ c: Cfg) {
@@ -226,8 +313,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     private func fail(_ error: Error, _ completion: @escaping (Error?) -> Void) {
         log("FAIL: \(error.localizedDescription)")
+        let t = coreLogTail(lines: 10)
+        if !t.isEmpty { log("журнал ядра:\n" + t) }
         AppGroup.defaults.set(Sanitizer.clean(error.localizedDescription), forKey: TunnelKeys.lastError)
-        completion(error)
+        completion(error is TunnelError ? error : TunnelError.xray(error.localizedDescription))
     }
 
     private func log(_ s: String) { SharedLog.write(s) }

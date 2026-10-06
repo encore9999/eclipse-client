@@ -71,11 +71,16 @@ enum Sanitizer {
 enum SharedLog {
     private static let q = DispatchQueue(label: "eclipse.sharedlog")
     private static var url: URL { AppGroup.container.appendingPathComponent("tunnel.log") }
+    // Копия журнала в памяти процесса. Нужна, когда App Group недоступна (подпись сторонним
+    // сертификатом): файл расширения приложение не видит, но может запросить эту копию сообщением.
+    private static var ring: [String] = []
 
     static func write(_ s: String) {
         let safe = Sanitizer.clean(s)
         q.async {
             let line = "\(ISO8601DateFormatter().string(from: Date())) \(safe)\n"
+            ring.append(line)
+            if ring.count > 600 { ring.removeFirst(ring.count - 600) }
             guard let data = line.data(using: .utf8) else { return }
             if let h = try? FileHandle(forWritingTo: url) {
                 h.seekToEndOfFile()
@@ -87,8 +92,9 @@ enum SharedLog {
             }
         }
     }
-    static func clear() { try? FileManager.default.removeItem(at: url) }
+    static func clear() { q.sync { ring.removeAll() }; try? FileManager.default.removeItem(at: url) }
     static func read() -> String { (try? String(contentsOf: url)) ?? "" }
+    static func memoryDump() -> String { q.sync { ring.joined() } }
 }
 
 struct Server: Identifiable, Codable, Equatable {
@@ -119,7 +125,8 @@ struct Server: Identifiable, Codable, Equatable {
     /// QUIC-протоколы слушают UDP — TCP-проверка порта для них бессмысленна.
     var isUDPBased: Bool { proto == "hysteria2" || proto == "tuic" }
     /// Ядро, которое умеет этот протокол.
-    var core: String { proto == "tuic" ? "singbox" : "xray" }
+    /// TUIC и Hysteria2 обслуживает sing-box (в Xray TUIC нет, а его Hysteria2 у нас не заработал).
+    var core: String { (proto == "tuic" || proto == "hysteria2") ? "singbox" : "xray" }
 
     var protocolLabel: String {
         if proto == "hysteria2" { return "HYSTERIA 2" }

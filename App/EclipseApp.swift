@@ -27,7 +27,81 @@ struct EclipseApp: App {
                 .environmentObject(store)
                 .environmentObject(vpn)
                 .environmentObject(AppSettings.shared)
-                .preferredColorScheme(AppSettings.shared.appearance.scheme)
+                .modifier(AppearanceModifier())
+                .modifier(ToastHost())
+        }
+    }
+}
+
+// MARK: - Уведомления внутри клиента
+
+final class ToastCenter: ObservableObject {
+    static let shared = ToastCenter()
+    enum Kind { case success, info, error }
+    struct Toast: Identifiable, Equatable {
+        let id = UUID(); let text: String; let kind: Kind
+    }
+    @Published var current: Toast?
+    private var work: DispatchWorkItem?
+
+    func show(_ text: String, _ kind: Kind = .success) {
+        DispatchQueue.main.async {
+            self.work?.cancel()
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                self.current = Toast(text: text, kind: kind)
+            }
+            let w = DispatchWorkItem { [weak self] in
+                withAnimation(.easeInOut(duration: 0.25)) { self?.current = nil }
+            }
+            self.work = w
+            DispatchQueue.main.asyncAfter(deadline: .now() + (kind == .error ? 4.5 : 2.6), execute: w)
+        }
+    }
+}
+
+struct ToastView: View {
+    let toast: ToastCenter.Toast
+    private var icon: String {
+        switch toast.kind {
+        case .success: return "checkmark.circle.fill"
+        case .info: return "info.circle.fill"
+        case .error: return "exclamationmark.triangle.fill"
+        }
+    }
+    private var tint: Color {
+        switch toast.kind {
+        case .success: return Color(hex: 0x4ADE80)
+        case .info: return Theme.accentLight
+        case .error: return Color(hex: 0xFF8A8A)
+        }
+    }
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: icon).foregroundColor(tint).font(.system(size: 16, weight: .semibold))
+            Text(toast.text)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundColor(Theme.text)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 14).padding(.vertical, 11)
+        .background(RoundedRectangle(cornerRadius: 16).fill(Theme.card))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(tint.opacity(0.45), lineWidth: 1))
+        .shadow(color: Color.black.opacity(0.25), radius: 12, x: 0, y: 4)
+    }
+}
+
+struct ToastHost: ViewModifier {
+    @ObservedObject private var center = ToastCenter.shared
+    func body(content: Content) -> some View {
+        content.overlay(alignment: .top) {
+            if let t = center.current {
+                ToastView(toast: t)
+                    .id(t.id)
+                    .padding(.horizontal, 16).padding(.top, 6)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .onTapGesture { withAnimation { center.current = nil } }
+            }
         }
     }
 }
@@ -473,6 +547,9 @@ struct SubGroup: Identifiable, Codable, Equatable {
     var pingDisplayRaw: String? = nil
     var pingProtocolRaw: String? = nil
     var tunnelDNS: [String]? = nil
+    /// "Био" подписки (заголовок announce, как в Happ)
+    var announce: String? = nil
+    var announceURL: String? = nil
 
     var pingDisplayOverride: PingDisplay? {
         get { pingDisplayRaw.flatMap { PingDisplay(rawValue: $0) } }
@@ -549,12 +626,15 @@ final class Store: ObservableObject {
     func removeServer(_ id: UUID) {
         for i in groups.indices { groups[i].servers.removeAll { $0.id == id } }
         fixSelection()
+        ToastCenter.shared.show("Сервер удалён", .info)
     }
     func removeGroup(_ id: UUID) {
         groups.removeAll { $0.id == id }
         fixSelection()
+        ToastCenter.shared.show("Подписка удалена", .info)
     }
     func renameServer(_ id: UUID, to newName: String) {
+        ToastCenter.shared.show("Переименовано")
         for i in groups.indices {
             for j in groups[i].servers.indices where groups[i].servers[j].id == id {
                 groups[i].servers[j].name = newName
@@ -570,6 +650,7 @@ final class Store: ObservableObject {
                 groups[i].servers[j] = s
             }
         }
+        ToastCenter.shared.show("Конфиг сохранён")
     }
     func updateGroupSettings(_ groupID: UUID,
                              name: String?,
@@ -585,6 +666,7 @@ final class Store: ObservableObject {
         groups[i].pingDisplayOverride = pingDisplay
         groups[i].pingProtocolOverride = pingProtocol
         groups[i].tunnelDNS = tunnelDNS
+        ToastCenter.shared.show("Настройки подписки сохранены")
     }
 
     private func addManual(_ server: Server) {
@@ -600,7 +682,11 @@ final class Store: ObservableObject {
     func add(_ input: String) async -> Bool {
         message = nil
         var text = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let single = LinkParser.parse(text) { addManual(single); return true }
+        if let single = LinkParser.parse(text) {
+            addManual(single)
+            ToastCenter.shared.show("Сервер добавлен: \(single.name)")
+            return true
+        }
         let decoded = text.removingPercentEncoding ?? text
         for p in ["https://", "http://"] {
             if let r = decoded.range(of: p) { text = String(decoded[r.lowerBound...]); break }
@@ -608,6 +694,7 @@ final class Store: ObservableObject {
         guard let url = URL(string: text), let scheme = url.scheme?.lowercased(),
               scheme == "http" || scheme == "https" else {
             message = "Не похоже на ссылку подписки или сервера"
+            ToastCenter.shared.show("Не похоже на ссылку подписки или сервера", .error)
             return false
         }
         if let existing = groups.first(where: { $0.url == text }) {
@@ -615,8 +702,12 @@ final class Store: ObservableObject {
         }
         let g = SubGroup(name: url.host ?? "Подписка", url: text)
         groups.append(g)
-        let ok = await refresh(g.id)
-        if !ok { groups.removeAll { $0.id == g.id } }
+        let ok = await refresh(g.id, quiet: true)
+        if !ok {
+            groups.removeAll { $0.id == g.id }
+        } else if let added = groups.first(where: { $0.id == g.id }) {
+            ToastCenter.shared.show("Подписка добавлена: \(added.name) · \(added.servers.count) серв.")
+        }
         return ok
     }
 
@@ -632,7 +723,7 @@ final class Store: ObservableObject {
 
     @MainActor
     @discardableResult
-    func refresh(_ groupID: UUID) async -> Bool {
+    func refresh(_ groupID: UUID, quiet: Bool = false) async -> Bool {
         guard let g = groups.first(where: { $0.id == groupID }),
               !g.url.isEmpty, let url = URL(string: g.url) else { return false }
         refreshing.insert(groupID)
@@ -645,7 +736,11 @@ final class Store: ObservableObject {
             let text = String(data: data, encoding: .utf8) ?? ""
             var seen = Set<String>()
             var parsed = LinkParser.parseSubscription(text).filter { seen.insert($0.link).inserted }
-            if parsed.isEmpty { message = "В подписке не найдено серверов"; return false }
+            if parsed.isEmpty {
+                message = "В подписке не найдено серверов"
+                if !quiet { ToastCenter.shared.show("В подписке не найдено серверов", .error) }
+                return false
+            }
             guard let i = groups.firstIndex(where: { $0.id == groupID }) else { return false }
             let old = groups[i].servers
             parsed = parsed.map { (item: Server) -> Server in
@@ -661,6 +756,18 @@ final class Store: ObservableObject {
                 groups[i].used = info.used; groups[i].total = info.total; groups[i].expire = info.expire
                 groups[i].supportURL = http.value(forHTTPHeaderField: "support-url")
                 groups[i].webURL = http.value(forHTTPHeaderField: "profile-web-page-url")
+                groups[i].announce = Store.decodeHeader(http.value(forHTTPHeaderField: "announce"))
+                groups[i].announceURL = http.value(forHTTPHeaderField: "announce-url")
+            }
+            if groups[i].announce == nil {
+                // запасной вариант: строка "#announce: текст" внутри самой подписки
+                for line in text.components(separatedBy: .newlines) {
+                    let t = line.trimmingCharacters(in: .whitespaces)
+                    if t.lowercased().hasPrefix("#announce:") {
+                        groups[i].announce = Store.decodeHeader(String(t.dropFirst(10)))
+                        break
+                    }
+                }
             }
             if let t = profileTitle(response) { groups[i].name = t }
             if !allServers.contains(where: { $0.id == selectedID }) {
@@ -676,9 +783,14 @@ final class Store: ObservableObject {
                     } catch { SharedLog.write("[app] geo download failed") }
                 }
             }
+            if !quiet {
+                let n = groups.first(where: { $0.id == groupID })?.servers.count ?? 0
+                ToastCenter.shared.show("Подписка обновлена · \(n) серв.")
+            }
             return true
         } catch {
             message = "Ошибка загрузки: \(error.localizedDescription)"
+            if !quiet { ToastCenter.shared.show("Не удалось обновить подписку: \(error.localizedDescription)", .error) }
             return false
         }
     }
@@ -686,7 +798,25 @@ final class Store: ObservableObject {
     @MainActor
     func refreshAll() async {
         let ids = groups.filter { !$0.url.isEmpty }.map { $0.id }
-        for id in ids { _ = await refresh(id) }
+        var ok = 0
+        for id in ids { if await refresh(id, quiet: true) { ok += 1 } }
+        if !ids.isEmpty {
+            ToastCenter.shared.show("Обновлено подписок: \(ok) из \(ids.count)", ok == ids.count ? .success : .error)
+        }
+    }
+
+    /// Заголовки подписки бывают в base64:, в percent-encoding или в "кривой" Latin-1 кодировке.
+    static func decodeHeader(_ raw: String?) -> String? {
+        guard var t = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else { return nil }
+        if t.lowercased().hasPrefix("base64:") {
+            t = LinkParser.decodeBase64(String(t.dropFirst(7))) ?? t
+        } else if t.contains("%"), let d = t.removingPercentEncoding {
+            t = d
+        } else if let d = t.data(using: .isoLatin1), let u = String(data: d, encoding: .utf8) {
+            t = u
+        }
+        t = t.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty ? nil : t
     }
 
     struct UserInfo { var used: Int64?; var total: Int64?; var expire: Date? }
@@ -721,7 +851,7 @@ final class Store: ObservableObject {
             let hours = g.updateIntervalHours ?? globalHours
             return Date().timeIntervalSince(g.updatedAt ?? .distantPast) > TimeInterval(hours) * 3600
         }.map { $0.id }
-        for id in ids { _ = await refresh(id) }
+        for id in ids { _ = await refresh(id, quiet: true) }
     }
 
     @MainActor
@@ -742,6 +872,12 @@ final class Store: ObservableObject {
             }
         }
         pingingGroups.remove(groupID)
+        let alive = servers.filter { (pings[$0.id] ?? -1) >= 0 }.count
+        if alive == 0 {
+            ToastCenter.shared.show("Пинг: ни один сервер не ответил (\(mode.title))", .error)
+        } else {
+            ToastCenter.shared.show("Пинг завершён: доступно \(alive) из \(servers.count) (\(mode.title))")
+        }
     }
 
     @MainActor
@@ -750,6 +886,8 @@ final class Store: ObservableObject {
         let mode = g?.pingProtocolOverride ?? AppSettings.shared.pingProtocol
         let ms = await Store.measure(server, mode: mode)
         self.pings[server.id] = ms ?? -1
+        if let ms = ms { ToastCenter.shared.show("\(server.name): \(ms) мс (\(mode.title))", .info) }
+        else { ToastCenter.shared.show("\(server.name): нет ответа (\(mode.title))", .error) }
     }
 
     /// Пинг с учётом выбранного протокола. Для HTTP-режимов https включается
@@ -766,7 +904,9 @@ final class Store: ObservableObject {
 
 final class VPNController: ObservableObject {
     @Published var status: NEVPNStatus = .disconnected
-    @Published var error: String?
+    @Published var error: String? {
+        didSet { if let e = error, !e.isEmpty { ToastCenter.shared.show(e, .error) } }
+    }
     @Published var connectedAt: Date? {
         didSet {
             if let d = connectedAt {
@@ -794,6 +934,7 @@ final class VPNController: ObservableObject {
         ) { [weak self] _ in
             guard let self = self, let conn = self.manager?.connection else { return }
             let new = conn.status
+            let old = self.status
             self.previous = new
             self.status = new
             switch new {
@@ -804,7 +945,14 @@ final class VPNController: ObservableObject {
             if new == .connected {
                 self.error = nil
                 if self.connectedAt == nil { self.connectedAt = Date() }
+                if old != .connected {
+                    ToastCenter.shared.show("VPN подключён")
+                    self.scheduleHealthCheck()
+                }
             } else if new == .disconnected {
+                if old == .connected || old == .disconnecting {
+                    if self.userStopped { ToastCenter.shared.show("VPN отключён", .info) }
+                }
                 self.connectedAt = nil
             }
             if new == .disconnected && self.sawActive {
@@ -851,6 +999,40 @@ final class VPNController: ObservableObject {
                 }
             }
         } else { error = fallback }
+    }
+
+    // MARK: связь с расширением (работает даже без App Group)
+
+    private func sendMessage(_ text: String, _ done: @escaping (String?) -> Void) {
+        guard let session = manager?.connection as? NETunnelProviderSession,
+              session.status != .disconnected, session.status != .invalid else { done(nil); return }
+        do {
+            try session.sendProviderMessage(Data(text.utf8)) { data in
+                done(data.flatMap { String(data: $0, encoding: .utf8) })
+            }
+        } catch { done(nil) }
+    }
+
+    /// Журнал туннеля прямо из работающего расширения.
+    func fetchTunnelLog(_ done: @escaping (String) -> Void) {
+        sendMessage("logs") { r in DispatchQueue.main.async { done(r ?? "") } }
+    }
+
+    /// Через 3 с после подключения спрашиваем расширение: проходит ли трафик через ядро.
+    private func scheduleHealthCheck() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            guard let self = self, self.status == .connected else { return }
+            self.sendMessage("health") { r in
+                DispatchQueue.main.async {
+                    guard let r = r else { return }
+                    SharedLog.write("[app] проверка трафика: \(r)")
+                    if r.hasPrefix("FAIL") {
+                        let why = r.dropFirst(5).trimmingCharacters(in: .whitespaces)
+                        self.error = "VPN подключён, но трафик не проходит: \(why)"
+                    }
+                }
+            }
+        }
     }
 
     var embeddedExtensionID: String? {
@@ -929,7 +1111,8 @@ final class VPNController: ObservableObject {
         userStopped = false
         sawActive = false
         SharedLog.clear()
-        SharedLog.write("[app] старт: \(server.protocolLabel) \(server.host):\(server.port)")
+        SharedLog.write("[app] Eclipse \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"), iOS \(UIDevice.current.systemVersion), \(AppSettings.modelIdentifier), appGroup=\(AppGroup.available ? "ok" : "НЕТ")")
+        SharedLog.write("[app] старт: \(server.protocolLabel) \(server.host):\(server.port), ядро=\(server.core), killSwitch=\(killSwitch), onDemand=\(AppSettings.shared.onDemand)")
         let profile: XrayProfile
         do {
             profile = try XrayConfigBuilder.build(for: server, options: AppSettings.shared.tunnelOptions, logPath: nil)
@@ -1170,6 +1353,19 @@ struct HomeView: View {
 
 // MARK: - Единый блок подписки с треугольником
 
+enum AnnounceText {
+    /// Превращает @упоминания и http-ссылки в кликабельные.
+    static func attributed(_ raw: String) -> AttributedString {
+        var t = raw
+        t = t.replacingOccurrences(of: "(?<![\\w/@.])@([A-Za-z][A-Za-z0-9_]{3,31})",
+                                   with: "[@$1](https://t.me/$1)", options: .regularExpression)
+        t = t.replacingOccurrences(of: "(?<![\\(\\[\\w])(https?://[^\\s\\)\\]]+)",
+                                   with: "[$1]($1)", options: .regularExpression)
+        let opts = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        return (try? AttributedString(markdown: t, options: opts)) ?? AttributedString(raw)
+    }
+}
+
 struct SubscriptionBlock: View {
     @EnvironmentObject var store: Store
     @EnvironmentObject var settings: AppSettings
@@ -1299,6 +1495,25 @@ struct SubscriptionBlock: View {
                     Text(info)
                         .font(.system(size: 12, weight: .medium))
                         .foregroundColor(Theme.muted)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+            }
+
+            if let note = group.announce, !note.isEmpty {
+                Rectangle().fill(Theme.border.opacity(0.5)).frame(height: 1)
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "info.circle")
+                        .font(.system(size: 15))
+                        .foregroundColor(Theme.muted)
+                        .padding(.top, 1)
+                    Text(AnnounceText.attributed(note))
+                        .font(.system(size: 12))
+                        .foregroundColor(Theme.muted)
+                        .tint(Theme.accentLight)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 12)
@@ -2634,6 +2849,22 @@ struct SettingsView: View {
         let b = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "4"
         return "\(v) (\(b))"
     }
+    /// Журнал приложения + журнал туннеля. Если App Group недоступна, файл расширения
+    /// не виден приложению, поэтому запрашиваем его у работающего расширения напрямую.
+    private func reloadLog() {
+        let base = SharedLog.read()
+        log = base
+        vpn.fetchTunnelLog { dump in
+            guard !dump.isEmpty else { return }
+            let marker = "--- журнал ядра ---"
+            if AppGroup.available {
+                if let r = dump.range(of: marker) { log = base + "\n" + String(dump[r.lowerBound...]) }
+            } else {
+                log = (base.isEmpty ? "" : base + "\n--- журнал туннеля ---\n") + dump
+            }
+        }
+    }
+
     private var statusName: String {
         switch vpn.status {
         case .invalid: return "invalid"
@@ -2907,7 +3138,7 @@ struct SettingsView: View {
                         SettingsPage("Логи", icon: "doc.text.magnifyingglass") {
                             SettingsSection("Журнал", icon: "doc.text") {
                                 HStack(spacing: 10) {
-                                    Button { log = SharedLog.read() } label: {
+                                    Button { reloadLog() } label: {
                                         Label("Обновить", systemImage: "arrow.clockwise")
                                             .font(.system(size: 14, weight: .medium))
                                             .foregroundColor(Theme.text)
@@ -2918,6 +3149,7 @@ struct SettingsView: View {
 
                                     Button {
                                         UIPasteboard.general.string = log
+                                        ToastCenter.shared.show("Журнал скопирован")
                                         copied = true
                                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
                                     } label: {
@@ -2960,7 +3192,7 @@ struct SettingsView: View {
                         SettingsPage("О приложении", icon: "info.circle") {
                             SettingsSection("Информация", icon: "info.circle") {
                                 diagRow("Eclipse", version)
-                                diagRow("Ядро", "Xray-core")
+                                diagRow("Ядро", "Xray-core + sing-box")
                                 diagRow("Туннель", "Tun2SocksKit")
                                 diagRow("Лицензия", "GPL-3.0")
                             }
@@ -2978,9 +3210,9 @@ struct SettingsView: View {
             .background(Theme.bg.ignoresSafeArea())
             .navigationBarHidden(true)
         }
-        .onAppear { log = SharedLog.read() }
+        .onAppear { reloadLog() }
         .onChange(of: vpn.status) { _ in
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { log = SharedLog.read() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { reloadLog() }
         }
         .confirmationDialog("Сбросить все настройки?", isPresented: $confirmReset, titleVisibility: .visible) {
             Button("Сбросить", role: .destructive) { settings.reset() }
