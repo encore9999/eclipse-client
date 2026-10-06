@@ -261,7 +261,7 @@ App Store.
 - [x] GeoIP / GeoSite маршрутизация
 - [x] Kill-switch и On-Demand
 - [x] Настраиваемый лимит памяти ядра
-- [ ] Поддержка sing-box
+- [x] Поддержка sing-box
 - [ ] Дополнительные pluggable-транспорты
 
 ---
