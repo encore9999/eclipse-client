@@ -20,12 +20,14 @@ jobs:
           export PATH=$PATH:$(go env GOPATH)/bin
           gomobile init
           go get github.com/xtls/xray-core@latest
+          go get github.com/sagernet/sing-box@v1.14.2
           go get -tool golang.org/x/mobile/cmd/gobind
           go get -tool golang.org/x/mobile/cmd/gomobile
           go mod tidy
           mkdir -p ../Frameworks
           gomobile bind -target=ios -iosversion=15.0 -trimpath \
-            -ldflags="-s -w" \
+            -tags="with_quic" \
+            -ldflags="-s -w -checklinkname=0" \
             -o ../Frameworks/Xray.xcframework ./xraybridge
           ls -la ../Frameworks
 
